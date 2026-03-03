@@ -1,0 +1,4798 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="theme-color" content="#0a0012">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="RESCUE">
+<meta name="application-name" content="RESCUE">
+<link rel="manifest" href="/manifest.json">
+<title>🚨 RESCUE</title>
+<link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;900&family=Orbitron:wght@700;900&display=swap" rel="stylesheet">
+<script type="module">
+import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js';
+import { getDatabase, ref, set, get, onValue, push, update, remove, query, orderByChild, limitToLast, onChildAdded } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js';
+import { getFirestore, doc, setDoc, getDoc, deleteDoc } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js';
+import { getMessaging, getToken, onMessage } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-messaging.js';
+
+// ══════════════════════════════════════════════════════════════
+// FIREBASE CONFIG — مُدمج مباشرة في الكود (غير مرئي للمستخدمين)
+// ══════════════════════════════════════════════════════════════
+const _HARDCODED_CFG = {
+  apiKey: "AIzaSyCtaxVFLF3bveIgrwfXtsL2-onljl_woQo",
+  authDomain: "rescuse.firebaseapp.com",
+  databaseURL: "https://rescuse-default-rtdb.firebaseio.com",
+  projectId: "rescuse",
+  storageBucket: "rescuse.firebasestorage.app",
+  messagingSenderId: "846090206196",
+  appId: "1:846090206196:web:82af027a7aef247ba717a1",
+  measurementId: "G-1D6507TVFK"
+};
+function _loadConfig(){ return _HARDCODED_CFG; }
+function _saveConfig(cfg){} // لا حاجة للحفظ
+function _clearConfig(){}   // لا حاجة للمسح
+
+let _savedCfg = _HARDCODED_CFG;
+
+let _db, _fs, _app, _msg;
+let _fcmToken = null;
+let DEMO = false;
+const _bc = new BroadcastChannel('_rsc_ch');
+const _DK  = '_rsc_db';
+
+function _isRealConfig(cfg){
+  return cfg && cfg.apiKey && !cfg.apiKey.includes('DEMO') &&
+         !cfg.apiKey.includes('REPLACE') && cfg.apiKey.length > 20 &&
+         cfg.databaseURL && cfg.databaseURL.includes('firebaseio');
+}
+
+function _initFirebase(cfg){
+  if(!_isRealConfig(cfg)){ DEMO = true; return; }
+  try {
+    _app = initializeApp(cfg);
+    _db  = getDatabase(_app);
+    _fs  = getFirestore(_app);
+    try { _msg = getMessaging(_app); } catch(e) { _msg = null; }
+    onValue(ref(_db, '.info/connected'), s => {
+      const el = document.getElementById('conn-status');
+      if (el) el.textContent = s.val() ? '🟢 متصل' : '🔴 منقطع';
+    });
+    DEMO = false;
+  } catch(e) {
+    DEMO = true;
+    console.warn('Firebase init failed:', e);
+  }
+}
+
+_initFirebase(_savedCfg);
+
+// ─── Timeout wrapper لكل عمليات Firebase ─────────────────────
+function withTimeout(promise, ms=8000, fallback=null) {
+  const timeout = new Promise((_,reject) =>
+    setTimeout(() => reject(new Error('timeout')), ms)
+  );
+  return Promise.race([promise, timeout]).catch(e => {
+    if (e.message === 'timeout' || e.code === 'PERMISSION_DENIED' || e.message?.includes('permission')) {
+      DEMO = true;
+      const el = document.getElementById('conn-status');
+      if (el) el.textContent = '🟡 محلي';
+    }
+    if (fallback !== null) return fallback;
+    throw e;
+  });
+}
+
+// ─── DEMO helpers ────────────────────────────────────────────
+function _dg(path) {
+  const d = JSON.parse(localStorage.getItem(_DK)||'{}');
+  return path.split('/').filter(Boolean).reduce((c,p)=>c?.[p], d) ?? null;
+}
+function _ds(path, val) {
+  const d = JSON.parse(localStorage.getItem(_DK)||'{}');
+  const parts = path.split('/').filter(Boolean);
+  let c = d;
+  for (let i=0;i<parts.length-1;i++){if(!c[parts[i]])c[parts[i]]={};c=c[parts[i]];}
+  c[parts[parts.length-1]] = val;
+  localStorage.setItem(_DK, JSON.stringify(d));
+  _bc.postMessage({p: path});
+}
+function _dd(path) {
+  const d = JSON.parse(localStorage.getItem(_DK)||'{}');
+  const parts = path.split('/').filter(Boolean);
+  let c = d;
+  for (let i=0;i<parts.length-1;i++){if(!c[parts[i]])return;c=c[parts[i]];}
+  delete c[parts[parts.length-1]];
+  localStorage.setItem(_DK, JSON.stringify(d));
+}
+
+// ─── Firebase wrappers ───────────────────────────────────────
+async function dbGet(path) {
+  if (DEMO) return _dg(path);
+  try {
+    const s = await withTimeout(get(ref(_db, path)), 7000, null);
+    if (s === null) return _dg(path); // fallback to local
+    return s.exists() ? s.val() : null;
+  } catch(e) {
+    DEMO = true;
+    return _dg(path);
+  }
+}
+async function dbSet(path, val) {
+  if (DEMO) { _ds(path, val); return; }
+  try {
+    await withTimeout(set(ref(_db, path), val), 7000);
+  } catch(e) {
+    DEMO = true;
+    _ds(path, val);
+  }
+}
+async function dbUpdate(path, val) {
+  if (DEMO) { const c=_dg(path)||{}; _ds(path,{...c,...val}); return; }
+  try {
+    await withTimeout(update(ref(_db, path), val), 7000);
+  } catch(e) {
+    DEMO = true;
+    const c=_dg(path)||{}; _ds(path,{...c,...val});
+  }
+}
+async function dbRemove(path) {
+  if (DEMO) { _dd(path); return; }
+  try {
+    await withTimeout(remove(ref(_db, path)), 7000);
+  } catch(e) {
+    DEMO = true;
+    _dd(path);
+  }
+}
+function dbListen(path, cb) {
+  if (DEMO) {
+    cb(_dg(path));
+    const h = e => { if(e.data?.p?.startsWith(path.split('/').slice(0,3).join('/'))) cb(_dg(path)); };
+    _bc.addEventListener('message', h);
+    return () => _bc.removeEventListener('message', h);
+  }
+  const unsub = onValue(ref(_db, path), s => cb(s.exists()?s.val():null));
+  return unsub;
+}
+async function fsSet(col, id, data) {
+  if (DEMO) { _ds(`_fs/${col}/${id}`, data); return; }
+  try {
+    await withTimeout(setDoc(doc(_fs, col, id), data), 8000);
+  } catch(e) {
+    DEMO = true;
+    _ds(`_fs/${col}/${id}`, data);
+  }
+}
+async function fsGet(col, id) {
+  if (DEMO) return _dg(`_fs/${col}/${id}`);
+  try {
+    const s = await withTimeout(getDoc(doc(_fs, col, id)), 7000, null);
+    if (s === null) return _dg(`_fs/${col}/${id}`);
+    return s.exists() ? s.data() : null;
+  } catch(e) {
+    DEMO = true;
+    return _dg(`_fs/${col}/${id}`);
+  }
+}
+async function fsDel(col, id) {
+  if (DEMO) { _dd(`_fs/${col}/${id}`); return; }
+  try {
+    await withTimeout(deleteDoc(doc(_fs, col, id)), 7000);
+  } catch(e) {
+    DEMO = true;
+    _dd(`_fs/${col}/${id}`);
+  }
+}
+
+// ─── Image helpers ────────────────────────────────────────────
+function compressImg(dataUrl, maxW=200, maxH=200, q=0.75) {
+  return new Promise(res => {
+    const img = new Image();
+    img.onload = () => {
+      let w=img.width, h=img.height;
+      if(w>maxW){h=Math.round(h*maxW/w);w=maxW;}
+      if(h>maxH){w=Math.round(w*maxH/h);h=maxH;}
+      const c=document.createElement('canvas');
+      c.width=w; c.height=h;
+      c.getContext('2d').drawImage(img,0,0,w,h);
+      res(c.toDataURL('image/jpeg',q));
+    };
+    img.onerror = ()=>res(dataUrl);
+    img.src = dataUrl;
+  });
+}
+async function saveAvatar(username, dataUrl) {
+  if (!dataUrl) return '';
+  const compressed = await compressImg(dataUrl);
+  await fsSet('avatars', username, { imageData: compressed, updatedAt: Date.now() });
+  return compressed;
+}
+async function loadAvatar(username) {
+  if (!username) return '';
+  const d = await fsGet('avatars', username);
+  return d?.imageData || '';
+}
+
+// ─── Audio ────────────────────────────────────────────────────
+let _actx;
+let _audioUnlocked = false;
+
+// فتح AudioContext مبكراً عند أول تفاعل للمستخدم
+function _unlockAudio() {
+  if (_audioUnlocked) return;
+  try {
+    if (!_actx) _actx = new (window.AudioContext || window.webkitAudioContext)();
+    if (_actx.state === 'suspended') {
+      _actx.resume().then(() => { _audioUnlocked = true; }).catch(() => {});
+    } else {
+      _audioUnlocked = true;
+    }
+    // نغمة صامتة جداً لفك قفل المتصفح
+    const o = _actx.createOscillator();
+    const g = _actx.createGain();
+    g.gain.value = 0.00001;
+    o.connect(g); g.connect(_actx.destination);
+    o.start(0); o.stop(_actx.currentTime + 0.001);
+  } catch (e) {}
+}
+
+// استمع لأي تفاعل — أول لمسة تفتح القناة
+['touchstart','touchend','mousedown','click','keydown','pointerdown'].forEach(ev =>
+  document.addEventListener(ev, _unlockAudio, { once: false, passive: true })
+);
+
+function playAlarm(type='incoming') {
+  try {
+    if (!_actx) _actx = new (window.AudioContext || window.webkitAudioContext)();
+    if (_actx.state === 'suspended') _actx.resume();
+    const ctx = _actx;
+
+    if (type === 'incoming') {
+      // 🔊 صوت طوارئ عالٍ لمدة 10 ثوانٍ
+      playLoudEmergencyAlarm(ctx, 10);
+    } else if (type === 'send') {
+      // صوت إرسال خفيف
+      [[440,0,.08],[550,.1,.08],[660,.2,.1]].forEach(([f,s,d])=>{
+        const o=ctx.createOscillator(), g=ctx.createGain();
+        o.connect(g); g.connect(ctx.destination);
+        o.type='sine'; o.frequency.value=f;
+        g.gain.setValueAtTime(0.2,ctx.currentTime+s);
+        g.gain.exponentialRampToValueAtTime(0.001,ctx.currentTime+s+d);
+        o.start(ctx.currentTime+s); o.stop(ctx.currentTime+s+d+0.05);
+      });
+    }
+  } catch(e){ console.warn('Audio:',e); }
+}
+
+function playLoudEmergencyAlarm(ctx, duration=10) {
+  // إنشاء صوت إنذار طوارئ عالٍ ومتصاعد
+  const masterGain = ctx.createGain();
+  masterGain.gain.setValueAtTime(0.8, ctx.currentTime);
+  masterGain.connect(ctx.destination);
+
+  // طبقة 1: نغمة إنذار رئيسية (وailing siren effect)
+  const siren = ctx.createOscillator();
+  const sirenGain = ctx.createGain();
+  siren.connect(sirenGain); sirenGain.connect(masterGain);
+  siren.type = 'sawtooth';
+  sirenGain.gain.value = 0.6;
+
+  // تذبذب صوت السايرن بين 600 و 1200 Hz
+  for (let t = 0; t < duration; t += 0.6) {
+    siren.frequency.setValueAtTime(600, ctx.currentTime + t);
+    siren.frequency.linearRampToValueAtTime(1200, ctx.currentTime + t + 0.3);
+    siren.frequency.linearRampToValueAtTime(600, ctx.currentTime + t + 0.6);
+  }
+  siren.start(ctx.currentTime);
+  siren.stop(ctx.currentTime + duration);
+
+  // طبقة 2: نبضات سريعة للتنبيه
+  for (let i = 0; i < duration * 4; i++) {
+    const beep = ctx.createOscillator();
+    const beepGain = ctx.createGain();
+    beep.connect(beepGain); beepGain.connect(masterGain);
+    beep.type = 'square';
+    beep.frequency.value = i % 2 === 0 ? 880 : 1100;
+    const t = ctx.currentTime + i * 0.25;
+    beepGain.gain.setValueAtTime(0, t);
+    beepGain.gain.linearRampToValueAtTime(0.3, t + 0.02);
+    beepGain.gain.exponentialRampToValueAtTime(0.001, t + 0.2);
+    beep.start(t); beep.stop(t + 0.22);
+  }
+
+  // طبقة 3: صوت منخفض للعمق
+  const bass = ctx.createOscillator();
+  const bassGain = ctx.createGain();
+  bass.connect(bassGain); bassGain.connect(masterGain);
+  bass.type = 'sine';
+  bassGain.gain.value = 0.25;
+  for (let t = 0; t < duration; t += 0.5) {
+    bass.frequency.setValueAtTime(120, ctx.currentTime + t);
+    bass.frequency.linearRampToValueAtTime(200, ctx.currentTime + t + 0.25);
+  }
+  bass.start(ctx.currentTime);
+  bass.stop(ctx.currentTime + duration);
+}
+
+function stopAlarmLoop() {
+  clearInterval(alarmInterval);
+  clearTimeout(alarmTimeout);
+  alarmInterval = null;
+  alarmTimeout = null;
+}
+
+// تشغيل الإنذار لـ 10 ثوانٍ ثم إذا لم يُغلق يعيد الرنين كل 15 ثانية
+function startAlarmLoop() {
+  stopAlarmLoop();
+
+  const _fireAlarm = () => {
+    try {
+      if (!_actx) _actx = new (window.AudioContext || window.webkitAudioContext)();
+      const _go = () => {
+        playLoudEmergencyAlarm(_actx, 10);
+        vib([500,200,500,200,500,200,500,200,500,200,1000]);
+      };
+      if (_actx.state === 'suspended') {
+        _actx.resume().then(_go).catch(_go);
+      } else {
+        _go();
+      }
+    } catch(e) { console.warn('Alarm error:', e); }
+  };
+
+  // تشغيل فوري
+  _fireAlarm();
+
+  // إعادة التشغيل كل 15 ثانية ما لم يُغلق
+  alarmInterval = setInterval(() => {
+    if (!activeAlert) { stopAlarmLoop(); return; }
+    _fireAlarm();
+  }, 15000);
+}
+
+function vib(p){if(navigator.vibrate)navigator.vibrate(p);}
+
+// ─── Permissions System ──────────────────────────────────────
+async function reqNotif(){
+  if('Notification' in window && Notification.permission==='default'){
+    await Notification.requestPermission();
+  }
+}
+
+// ══════════════════════════════════════════════════════════════
+// NOTIFICATIONS — بدون Service Worker (يعمل مع file:// و https://)
+// ══════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════
+// PUSH NOTIFICATION SYSTEM — FCM + Service Worker
+// يعمل حتى عند إغلاق المتصفح بالكامل
+// ══════════════════════════════════════════════════════════════
+
+const _VAPID_KEY = "BFuPx6XSk_-wgVK3MIzbfrEmeQ7AjNy5gikohaAlceXgle7JwA2Ei1M3AOkUaJPO2JmAQIqdd8n9UW5b1Us4Ypk";
+
+const _NOTIF_ICON = 'data:image/svg+xml,' + encodeURIComponent(
+  '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">' +
+  '<rect width="100" height="100" rx="18" fill="%23060008"/>' +
+  '<circle cx="50" cy="50" r="42" fill="none" stroke="%23ff2244" stroke-width="5"/>' +
+  '<text x="50" y="65" text-anchor="middle" font-size="46">🚨</text>' +
+  '</svg>'
+);
+
+// ── تسجيل Service Worker الخارجي ────────────────────────────
+async function _registerSW() {
+  if (!('serviceWorker' in navigator)) return null;
+  try {
+    const reg = await navigator.serviceWorker.register('/firebase-messaging-sw.js', { scope: '/' });
+    console.log('[RESCUE] SW registered ✅');
+
+    navigator.serviceWorker.addEventListener('message', e => {
+      if (!e.data) return;
+      if (e.data.type === 'NOTIF_CLICK') {
+        const d = e.data.data || {};
+        window.focus();
+        if (d.type === 'sos') {
+          if (activeAlert) { _fillAlertCard(activeAlert); _showAlertScreen(activeAlert); startAlarmLoop(); }
+          else if (d.alertId && typeof _processIncomingAlert === 'function') {
+            setTimeout(() => _processIncomingAlert(d.alertId, d), 400);
+          }
+        } else if (d.type === 'chat' && d.from && typeof openChat === 'function') {
+          openChat(d.from);
+        }
+      }
+    });
+    return reg;
+  } catch(e) {
+    console.warn('[RESCUE] SW failed:', e.message);
+    return null;
+  }
+}
+
+// إرسال بيانات المستخدم للـ SW حتى يراقب Firebase في الخلفية
+async function _sendUserToSW() {
+  if (!('serviceWorker' in navigator) || !CU) return;
+  try {
+    const reg = await navigator.serviceWorker.ready;
+    if (reg && reg.active) {
+      reg.active.postMessage({
+        type:     'SET_USER',
+        username: CU.username,
+        friends:  friends || {}
+      });
+      console.log('[RESCUE] User sent to SW ✅', CU.username);
+    }
+  } catch(e) { console.warn('[RESCUE] sendUserToSW failed:', e); }
+}
+
+// ── تهيئة FCM وحفظ Token في Firebase ────────────────────────
+async function _initFCM() {
+  if (!_msg || DEMO) return;
+
+  // طلب إذن الإشعارات أولاً
+  if (!('Notification' in window)) { console.warn('[RESCUE] Notifications not supported'); return; }
+  let perm = Notification.permission;
+  if (perm === 'default') {
+    try { perm = await Notification.requestPermission(); } catch(e) {}
+  }
+  if (perm !== 'granted') { console.warn('[RESCUE] FCM aborted — permission:', perm); return; }
+
+  try {
+    let swReg = null;
+    if ('serviceWorker' in navigator) {
+      try {
+        swReg = await navigator.serviceWorker.register('/firebase-messaging-sw.js', { scope: '/' });
+        await navigator.serviceWorker.ready;
+      } catch(e) { console.warn('[RESCUE] SW register error:', e.message); }
+    }
+    const tokenOptions = { vapidKey: _VAPID_KEY };
+    if (swReg) tokenOptions.serviceWorkerRegistration = swReg;
+
+    const token = await getToken(_msg, tokenOptions);
+    if (token && CU) {
+      _fcmToken = token;
+      await dbUpdate(`users/${CU.username}`, { fcmToken: token, fcmUpdated: Date.now(), platform: 'web' });
+      console.log('[RESCUE] FCM token saved ✅', token.substring(0,20)+'...');
+      showToast('🔔 الإشعارات مفعّلة بنجاح ✅', 'success');
+    } else {
+      console.warn('[RESCUE] FCM getToken returned empty');
+    }
+  } catch(e) {
+    console.warn('[RESCUE] FCM token error:', e.message);
+  }
+
+  // استمع للرسائل عند فتح التطبيق (foreground)
+  try {
+    onMessage(_msg, payload => {
+      const d = payload.data || {};
+      if (d.type === 'sos') {
+        _showDirectNotif(
+          d.title || '🚨 نداء طوارئ!',
+          d.body  || 'اضغط للاستجابة',
+          d, true
+        );
+        // إشعار عائم إضافي
+        if (typeof showFloatNotif === 'function') {
+          showFloatNotif({
+            type: 'sos',
+            title: d.title || '🚨 نداء طوارئ!',
+            body: d.body || 'اضغط للاستجابة',
+            persistent: true,
+            onClick: () => { if (activeAlert) { _fillAlertCard(activeAlert); _showAlertScreen(activeAlert); } }
+          });
+        }
+      } else if (d.type === 'chat') {
+        // إشعار رسالة عائم
+        if (typeof showFloatNotif === 'function') {
+          showFloatNotif({
+            type: 'chat',
+            title: d.fromName || d.from || 'رسالة جديدة',
+            body: d.message || d.body || '',
+            from: d.from || '',
+            onClick: () => { if (d.from && typeof openChat === 'function') openChat(d.from); }
+          });
+        }
+      }
+    });
+  } catch(e) {}
+}
+
+// ── إرسال FCM Push لأجهزة المستلمين عبر Netlify Function ─────
+async function _sendFCMToUsers(targetUsernames, alertData) {
+  if (DEMO || !targetUsernames.length) return;
+  try {
+    const tokens = [];
+    for (const uname of targetUsernames) {
+      try {
+        const userData = await dbGet(`users/${uname}`);
+        if (userData && userData.fcmToken) tokens.push(userData.fcmToken);
+      } catch(e) {}
+    }
+    if (!tokens.length) { console.log('[RESCUE] No FCM tokens'); return; }
+    const hasLoc  = alertData.lat && alertData.lng;
+    const title   = '🚨 نداء طوارئ من ' + (alertData.fromName || alertData.from);
+    const bodyTxt = (alertData.message || 'يحتاج مساعدة عاجلة!') + (hasLoc ? ' 📍 مع الموقع' : '');
+    const resp = await fetch('/.netlify/functions/send-push', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        tokens, title, bodyText: bodyTxt,
+        data: {
+          type: 'sos',
+          alertId:  alertData.id  || String(Date.now()),
+          from:     alertData.from     || '',
+          fromName: alertData.fromName || '',
+          lat:      String(alertData.lat  || ''),
+          lng:      String(alertData.lng  || ''),
+          message:  alertData.message   || ''
+        }
+      })
+    });
+    const result = await resp.json();
+    console.log('[RESCUE] FCM Push sent:', result.sent, '/', result.total);
+  } catch(e) { console.warn('[RESCUE] FCM send error:', e); }
+}
+
+// ── إرسال إشعار مرئي مباشر ──────────────────────────────────
+function _showDirectNotif(title, body, data={}, requireInteraction=false) {
+  if (!('Notification' in window) || Notification.permission !== 'granted') return;
+  try {
+    const n = new Notification(title, {
+      body, icon: _NOTIF_ICON, badge: _NOTIF_ICON,
+      requireInteraction,
+      tag:      data.tag || ('rescue-' + Date.now()),
+      renotify: true, silent: false, data
+    });
+    n.onclick = () => {
+      window.focus(); n.close();
+      if (data.type === 'sos' && activeAlert) { _showAlertScreen(activeAlert); startAlarmLoop(); }
+      else if (data.type === 'chat' && data.from && typeof openChat === 'function') openChat(data.from);
+    };
+  } catch(e) {}
+}
+
+// ── الدالة المركزية للإشعارات ────────────────────────────────
+function _swNotif(payload) {
+  _showDirectNotif(
+    payload.title || (payload.type === 'sos' ? '🚨 نداء طوارئ!' : '💬 رسالة'),
+    payload.body  || '',
+    payload,
+    payload.type === 'sos'
+  );
+}
+
+
+
+
+
+// طلب جميع الأذونات المطلوبة بمجرد دخول المستخدم
+async function requestAllPermissions(){
+  // 1. فتح قناة الصوت مبكراً
+  _unlockAudio();
+
+  // 2. تسجيل Service Worker
+  await _registerSW();
+
+  // 3. طلب إذن الإشعارات + تهيئة FCM
+  if ('Notification' in window) {
+    let perm = Notification.permission;
+    if (perm === 'default') {
+      // Show custom permission request UI first
+      if (typeof showFloatNotif === 'function') {
+        showFloatNotif({
+          type: 'sos',
+          title: 'فعّل الإشعارات',
+          body: 'اضغط "سماح" لاستقبال نداءات الطوارئ والرسائل',
+          persistent: false
+        });
+      }
+      perm = await Notification.requestPermission();
+    }
+
+    if (perm === 'granted') {
+      showToast('🔔 الإشعارات مفعّلة — ستصلك النداءات حتى عند إغلاق المتصفح ✅', 'success');
+      setTimeout(() => _initFCM(), 1000);
+      setTimeout(() => {
+        try {
+          new Notification('🚨 RESCUE جاهز!', {
+            body: 'ستصلك إشعارات الطوارئ حتى عند إغلاق المتصفح',
+            icon: _NOTIF_ICON, tag: 'rescue-welcome', requireInteraction: false
+          });
+        } catch(e) {}
+      }, 1500);
+    } else if (perm === 'denied') {
+      setTimeout(() => showToast('🔕 الإشعارات محجوبة — افتح إعدادات المتصفح وفعّلها', 'error'), 1000);
+    } else {
+      showToast('⚠️ فعّل الإشعارات لاستقبال نداءات الطوارئ حتى عند إغلاق المتصفح', 'warning');
+    }
+  }
+
+  // 4. الموقع
+  if (navigator.geolocation) {
+    navigator.geolocation.getCurrentPosition(
+      () => {},
+      (err) => { if (err.code === 1) showToast('⚠️ فعّل الموقع لإرسال إحداثياتك عند الطوارئ', 'warning'); },
+      { timeout: 5000, maximumAge: 60000 }
+    );
+  }
+
+  // 5. WakeLock — إبقاء الشاشة مضاءة
+  if (navigator.wakeLock) {
+    try { await navigator.wakeLock.request('screen'); } catch(e) {}
+  }
+}
+function sendNotif(title, body, type='sos', extra={}){
+  if (type === 'sos' && extra.alertId) {
+    _addSOSNotif({ id: extra.alertId, fromName: extra.fromName, from: extra.from, message: body, timestamp: Date.now(), lat: extra.lat, lng: extra.lng });
+  }
+  if ('Notification' in window && Notification.permission === 'granted') {
+    try {
+      const n = new Notification(title, {
+        body, icon: _NOTIF_ICON, badge: _NOTIF_ICON,
+        requireInteraction: type === 'sos',
+        tag: type + '-' + Date.now(), renotify: true, silent: false
+      });
+      n.onclick = () => { window.focus(); n.close(); if(activeAlert) _showAlertScreen(activeAlert); };
+    } catch(e) {}
+  }
+}
+
+// ── استعادة التنبيه عند العودة للتطبيق ─────────────────────
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') {
+    if (activeAlert) {
+      const modal = $('alert-modal');
+      if (modal && !modal.classList.contains('show')) {
+        _fillAlertCard(activeAlert);
+        _showAlertScreen(activeAlert);
+      }
+      // أعد تشغيل الصوت عند العودة
+      if (!alarmInterval) startAlarmLoop();
+    }
+    // استئناف AudioContext إن كان مجمّداً
+    if (_actx && _actx.state === 'suspended') _actx.resume().catch(() => {});
+  }
+});
+
+// ─── Session ─────────────────────────────────────────────────
+let CU = null; // current user
+let alertUnsub = null;
+let presInterval = null;
+let friends = {};
+let friendsData = {};
+let _friendsReady = false;      // هل اكتمل تحميل الأصدقاء؟
+let _pendingAlerts = [];        // تنبيهات وصلت قبل اكتمال تحميل الأصدقاء
+let selectedTarget = 'all';        // 'all' | 'custom'
+let selectedTargets = new Set();   // usernames when custom
+let pressInt = null, pressP = 0;
+let activeAlert = null;
+let alarmInterval = null;          // repeat alarm interval
+let alarmTimeout = null;           // alarm stop timeout
+let avatarDataUrl = '';
+let editAvatarDataUrl = '';
+
+function loadSess(){const s=localStorage.getItem('_rsc_sess');return s?JSON.parse(s):null;}
+function saveSess(u){localStorage.setItem('_rsc_sess',JSON.stringify(u));}
+function clearSess(){localStorage.removeItem('_rsc_sess');}
+
+// ─── DOM ──────────────────────────────────────────────────────
+const $ = id => document.getElementById(id);
+
+function showScreen(name){
+  document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));
+  const el = $('screen-'+name);
+  if(el) el.classList.add('active');
+}
+function showLoading(msg='جاري التحميل...'){
+  $('loading-overlay').style.display='flex';
+  $('loading-msg').textContent=msg;
+}
+function hideLoading(){$('loading-overlay').style.display='none';}
+function showToast(msg,type='success'){
+  const t=document.createElement('div');
+  t.className=`toast toast-${type}`;
+  t.innerHTML=msg;
+  document.body.appendChild(t);
+  setTimeout(()=>t.classList.add('show'),10);
+  setTimeout(()=>{t.classList.remove('show');setTimeout(()=>t.remove(),400);},3200);
+}
+
+// ─────────────────────────────────────────────────────────────
+// REGISTER
+// ─────────────────────────────────────────────────────────────
+function initRegister(){
+  showScreen('register');
+  avatarDataUrl='';
+  $('reg-avatar-img').style.display='none';
+  $('reg-avatar-icon').style.display='flex';
+  $('reg-name').value='';
+  $('reg-username').value='';
+  $('reg-pass').value='';
+  $('reg-pass2').value='';
+  $('username-preview').textContent='';
+
+  $('reg-avatar-btn').onclick=()=>$('reg-avatar-file').click();
+  $('reg-avatar-file').onchange=async e=>{
+    const f=e.target.files[0]; if(!f)return;
+    const r=new FileReader();
+    r.onload=async ev=>{
+      avatarDataUrl=ev.target.result;
+      $('reg-avatar-img').src=avatarDataUrl;
+      $('reg-avatar-img').style.display='block';
+      $('reg-avatar-icon').style.display='none';
+    };
+    r.readAsDataURL(f);
+  };
+  $('reg-username').addEventListener('input',()=>{
+    const v=$('reg-username').value.replace(/[^a-z0-9_]/g,'');
+    $('reg-username').value=v;
+    $('username-preview').textContent=v?`@${v}`:'';
+  });
+  $('reg-submit').onclick=handleRegister;
+  $('go-login').onclick=()=>showScreen('login');
+}
+
+async function handleRegister(){
+  const name=$('reg-name').value.trim();
+  const username=$('reg-username').value.trim().toLowerCase();
+  const pass=$('reg-pass').value;
+  const pass2=$('reg-pass2').value;
+  if(!name) return showToast('الاسم مطلوب','error');
+  if(!username||username.length<3) return showToast('اليوزر 3 أحرف على الأقل','error');
+  if(!/^[a-z0-9_]+$/.test(username)) return showToast('اليوزر: أحرف إنجليزية وأرقام و _ فقط','error');
+  if(!pass||pass.length<6) return showToast('كلمة المرور 6 أحرف على الأقل','error');
+  if(pass!==pass2) return showToast('كلمتا المرور غير متطابقتان','error');
+
+  try {
+    showLoading('جاري إنشاء الحساب...');
+
+    const existing = await dbGet(`users/${username}`);
+    if(existing) { hideLoading(); return showToast('هذا اليوزر محجوز، اختر آخر','error'); }
+
+    // Save avatar (with fallback if Firestore fails)
+    let avatarUrl = '';
+    if (avatarDataUrl) {
+      try { avatarUrl = await saveAvatar(username, avatarDataUrl); }
+      catch { avatarUrl = avatarDataUrl; } // keep local copy if upload fails
+    }
+
+    const passHash = btoa(unescape(encodeURIComponent(pass)));
+    const user = {
+      name, username, passHash,
+      avatar: DEMO ? avatarUrl : '', // store URL ref only in Firebase
+      friends: {},
+      createdAt: Date.now(),
+      online: true,
+      lastSeen: Date.now(),
+    };
+    await dbSet(`users/${username}`, user);
+    user.avatar = avatarUrl; // keep full image in memory
+    CU = user;
+    saveSess({username, passHash});
+    hideLoading();
+
+    if (DEMO) showToast('✅ تم إنشاء الحساب (وضع محلي)', 'warning');
+    else showToast('✅ تم إنشاء الحساب بنجاح!');
+
+    initMain();
+  } catch(e){
+    hideLoading();
+    const msg = e.message?.includes('timeout')
+      ? 'انتهت مهلة الاتصال — تحقق من بيانات Firebase'
+      : e.message?.includes('permission') || e.message?.includes('PERMISSION')
+      ? 'خطأ في صلاحيات Firebase — تحقق من الـ Rules'
+      : 'خطأ في الاتصال: ' + (e.message || 'غير معروف');
+    showToast(msg, 'error');
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+// LOGIN
+// ─────────────────────────────────────────────────────────────
+function initLogin(){
+  showScreen('login');
+  $('login-username').value='';
+  $('login-pass').value='';
+  $('login-submit').onclick=handleLogin;
+  $('go-register').onclick=initRegister;
+}
+
+async function handleLogin(){
+  const username=$('login-username').value.trim().toLowerCase();
+  const pass=$('login-pass').value;
+  if(!username) return showToast('أدخل اليوزر','error');
+  if(!pass) return showToast('أدخل كلمة المرور','error');
+
+  try {
+    showLoading('جاري تسجيل الدخول...');
+    const user = await dbGet(`users/${username}`);
+    if(!user){ hideLoading(); return showToast('اليوزر غير موجود','error'); }
+
+    const passHash = btoa(unescape(encodeURIComponent(pass)));
+    if(user.passHash !== passHash){ hideLoading(); return showToast('كلمة المرور خاطئة','error'); }
+
+    // Load avatar from Firestore (best-effort)
+    try {
+      const av = await loadAvatar(username);
+      user.avatar = av || user.avatar || '';
+    } catch { user.avatar = user.avatar || ''; }
+
+    try { await dbUpdate(`users/${username}`,{online:true, lastSeen:Date.now()}); } catch{}
+    CU = user;
+    saveSess({username, passHash: user.passHash});
+    hideLoading();
+    initMain();
+  } catch(e){
+    hideLoading();
+    const msg = e.message?.includes('timeout')
+      ? 'انتهت مهلة الاتصال — تحقق من اتصال الإنترنت'
+      : e.message?.includes('permission') || e.message?.includes('PERMISSION')
+      ? 'خطأ في صلاحيات Firebase — تحقق من الـ Rules'
+      : 'خطأ في تسجيل الدخول: ' + (e.message || 'غير معروف');
+    showToast(msg, 'error');
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+// MAIN
+// ─────────────────────────────────────────────────────────────
+function initMain(){
+  showScreen('main');
+  updateTopbar();
+  _friendsReady = false;  // إعادة تعيين عند كل دخول
+  _pendingAlerts = [];
+  loadFriends();
+  startPresence();
+  requestAllPermissions(); // طلب كل الأذونات فوراً
+  initSosBtn();
+  initTabs();
+  listenUsersOnline();
+
+  if(alertUnsub) { alertUnsub(); alertUnsub = null; }
+
+  // ── الاستماع للتنبيهات الجديدة ──────────────────────────────
+  // الطريقة: onValue على آخر 50 تنبيه، مع timestamp أكبر من وقت الدخول
+  // هذا يحل مشكلة race condition بين تحميل الأصدقاء والاستماع للتنبيهات
+  const _listenStart = Date.now();
+
+  if (!DEMO) {
+    const alertsQuery = query(
+      ref(_db, 'alerts'),
+      orderByChild('timestamp'),
+      limitToLast(50)
+    );
+
+    alertUnsub = onChildAdded(alertsQuery, snap => {
+      if (!snap.exists() || !CU) return;
+      const a   = snap.val();
+      const id  = snap.key;
+
+      // تجاهل أي تنبيه قبل لحظة الدخول (التاريخي)
+      if (!a || !a.timestamp || a.timestamp < _listenStart - 5000) return;
+
+      // إذا لم تُحمَّل قائمة الأصدقاء بعد — أضفه للقائمة الانتظار
+      if (!_friendsReady) {
+        _pendingAlerts.push({ id, a });
+        return;
+      }
+
+      _processIncomingAlert(id, a);
+    });
+  } else {
+    // DEMO mode
+    alertUnsub = dbListen('alerts', alerts => {
+      if (!alerts || !CU) return;
+      const now = Date.now();
+      const pending = Object.entries(alerts)
+        .filter(([id, a]) => a && a.timestamp && a.timestamp > _listenStart - 5000 && _shouldShowAlert(id, a))
+        .sort(([,a],[,b]) => b.timestamp - a.timestamp);
+      if (pending.length > 0 && !activeAlert) {
+        const [id, a] = pending[0];
+        showIncomingAlert({ id, ...a });
+      }
+    });
+  }
+
+  if(DEMO) {
+    $('conn-status').textContent='🟡 محلي';
+    setTimeout(()=>showToast('📴 يعمل محلياً — أضف Firebase للمزامنة بين الأجهزة','warning'), 500);
+  }
+
+  // Start chat listeners after friends load
+  setTimeout(() => { _chatListeners = {}; _startChatListeners(); }, 2500);
+  // تحديث زر الجرس
+  setTimeout(() => _updateBell(), 1000);
+  // FCM: إعادة تهيئة token + إرسال بيانات المستخدم للـ SW
+  if ('Notification' in window && Notification.permission === 'granted') {
+    setTimeout(() => _initFCM(), 2000);
+  }
+  // أرسل بيانات المستخدم للـ SW ليراقب Firebase حتى عند الإغلاق
+  setTimeout(() => _sendUserToSW(), 3000);
+}
+
+function updateTopbar(){
+  if(!CU) return;
+  $('topbar-name').textContent=CU.name;
+  $('topbar-username').textContent='@'+CU.username;
+  setAvatarEl($('topbar-avatar'), CU.avatar, CU.name);
+}
+
+function setAvatarEl(el, avatar, name){
+  if(!el) return;
+  if(avatar){
+    el.style.backgroundImage=`url(${avatar})`;
+    el.textContent='';
+  } else {
+    el.style.backgroundImage='none';
+    el.textContent=(name||'?')[0].toUpperCase();
+  }
+}
+
+// ─── Presence ─────────────────────────────────────────────────
+function startPresence(){
+  if(!CU) return;
+  clearInterval(presInterval);
+  presInterval = setInterval(()=>{
+    if(CU) dbUpdate(`users/${CU.username}`,{online:true,lastSeen:Date.now()});
+  }, 25000);
+  const goOff=()=>{ if(CU) dbUpdate(`users/${CU.username}`,{online:false,lastSeen:Date.now()}); };
+  window.addEventListener('beforeunload',goOff);
+  window.addEventListener('pagehide',goOff);
+}
+
+// ─── Friends ─────────────────────────────────────────────────
+function loadFriends(){
+  dbListen(`users/${CU.username}/friends`, data=>{
+    friends = data||{};
+    CU.friends = friends;
+    const sess=loadSess(); if(sess){sess.friends=friends;saveSess(sess);}
+    updateTargetSelector();
+    renderFriendsList();
+    updateBadge();
+
+    // ── اكتمل تحميل الأصدقاء — افحص التنبيهات المعلّقة ──────
+    _friendsReady = true;
+    if (_pendingAlerts.length > 0) {
+      const toProcess = [..._pendingAlerts];
+      _pendingAlerts = [];
+      toProcess.forEach(({ id, a }) => _processIncomingAlert(id, a));
+    }
+    // أخبر الـ SW بتحديث قائمة الأصدقاء
+    if ('serviceWorker' in navigator && navigator.serviceWorker.controller) {
+      navigator.serviceWorker.controller.postMessage({
+        type: 'UPDATE_FRIENDS', friends: friends || {}
+      });
+    }
+  });
+}
+function listenUsersOnline(){
+  dbListen('users', users=>{
+    if(!users) return;
+    Object.keys(friends).forEach(u=>{ if(users[u]) friendsData[u]=users[u]; });
+    renderFriendsList();
+    updateTargetSelector();
+  });
+}
+function updateBadge(){
+  const n=Object.keys(friends).length;
+  const b=$('friends-badge');
+  if(b){b.textContent=n; b.style.display=n>0?'flex':'none';}
+}
+
+async function addFriend(uname){
+  uname=uname.toLowerCase().trim();
+  if(uname===CU.username) throw new Error('لا يمكنك إضافة نفسك');
+  const target=await dbGet(`users/${uname}`);
+  if(!target) throw new Error('اليوزر غير موجود');
+  const already=await dbGet(`users/${CU.username}/friends/${uname}`);
+  if(already) throw new Error('هذا الشخص موجود في قائمتك');
+  const av = await loadAvatar(uname);
+  await dbSet(`users/${CU.username}/friends/${uname}`,{
+    username:uname, name:target.name,
+    avatar: av || target.avatar || '',
+    addedAt:Date.now()
+  });
+  return target;
+}
+async function removeFriend(uname){
+  await dbRemove(`users/${CU.username}/friends/${uname}`);
+  delete friends[uname];
+  if(selectedTarget===uname) selectedTarget='all';
+  updateTargetSelector();
+}
+
+function _makeTapBtn(classes, html, onTap){
+  const btn = document.createElement('button');
+  btn.className = classes;
+  btn.innerHTML = html;
+  // استخدام pointerdown لأسرع استجابة على الجوال والكمبيوتر
+  // نتجنب تماماً touchstart+click لأنهما يسببان تكراراً
+  btn.addEventListener('pointerdown', e=>{
+    e.preventDefault();
+    onTap();
+  });
+  return btn;
+}
+
+function updateTargetSelector(){
+  const c=$('target-selector'); if(!c) return;
+  c.innerHTML='';
+
+  const isAll = selectedTarget === 'all';
+  const customCount = selectedTargets.size;
+
+  let btnLabel;
+  if (isAll) {
+    btnLabel=`<span>🌐</span><span>الجميع</span><span class="tgt-count">${Object.keys(friends).length}</span>`;
+  } else {
+    btnLabel=`<span>🎯</span><span>مخصص</span><span class="tgt-count tgt-count-custom">${customCount}</span>`;
+  }
+
+  const allBtn = _makeTapBtn('target-btn'+(isAll||selectedTarget==='custom'?' active':''), btnLabel, openTargetModal);
+  c.appendChild(allBtn);
+
+  if (selectedTarget === 'custom') {
+    selectedTargets.forEach(u=>{
+      const f=friends[u]; if(!f) return;
+      const isOn=friendsData[u]?.online;
+      const av = f.avatar
+        ? `<img src="${f.avatar}" class="tgt-av">`
+        : `<span class="tgt-init">${(f.name||u)[0].toUpperCase()}</span>`;
+      const chip = _makeTapBtn('target-btn active',
+        `<span class="tgt-wrap">${av}<span class="odot ${isOn?'on':'off'}"></span></span><span>@${u}</span>`,
+        openTargetModal);
+      c.appendChild(chip);
+    });
+  }
+}
+
+// ─── اتصال 911 ───────────────────────────────────────────────
+function call911(){
+  // يفتح لوحة الاتصال بالرقم مكتوباً مسبقاً
+  window.location.href = 'tel:911';
+}
+window.call911 = call911;
+
+// ─── Target Selection Modal ───────────────────────────────────
+// نرسم القائمة مسبقاً وندير الظهور/الإخفاء فقط
+let _tmodRendered = false;
+
+function openTargetModal(){
+  // ارسم المحتوى أولاً (بدون CSS transition)
+  renderTargetModal();
+  // أظهر فوراً — display:flex يظهر + الـ card تنزلق للأعلى
+  $('target-modal').classList.add('show');
+}
+
+function closeTargetModal(){
+  $('target-modal').classList.remove('show');
+  updateTargetSelector();
+}
+
+function renderTargetModal(){
+  const list=$('target-modal-list'); if(!list) return;
+
+  // بناء HTML كاملاً دفعةً واحدة (أسرع بكثير من createElement المتكرر)
+  const friendEntries = Object.entries(friends);
+  if(!friendEntries.length){
+    list.innerHTML='<div class="empty-state" style="padding:20px">👥<br>أضف أصدقاء أولاً</div>';
+    return;
+  }
+
+  const allSelected = selectedTarget === 'all';
+  let html = `
+    <div class="tmod-row${allSelected?' tmod-selected':''}" data-action="all">
+      <div class="tmod-av" style="background:rgba(255,34,68,.15);font-size:20px">🌐</div>
+      <div class="tmod-info">
+        <div class="tmod-name">الجميع</div>
+        <div class="tmod-sub">${friendEntries.length} أصدقاء</div>
+      </div>
+      <div class="tmod-check${allSelected?' checked':''}"></div>
+    </div>`;
+
+  friendEntries.forEach(([u,f])=>{
+    const isOn = friendsData[u]?.online;
+    const isSelected = selectedTarget==='all' || selectedTargets.has(u);
+    const chk = isSelected && selectedTarget!=='all';
+    const avHTML = f.avatar
+      ? `<img src="${f.avatar}" class="tmod-av-img" loading="eager">`
+      : `<div class="tmod-av">${(f.name||u)[0].toUpperCase()}</div>`;
+    html += `
+      <div class="tmod-row${chk?' tmod-selected':''}" data-action="user" data-u="${u}">
+        <div class="tmod-av-wrap">
+          ${avHTML}
+          <span class="odot ${isOn?'on':'off'}" style="position:absolute;bottom:1px;right:1px;width:10px;height:10px;border:2px solid #0d0018"></span>
+        </div>
+        <div class="tmod-info">
+          <div class="tmod-name">${f.name}</div>
+          <div class="tmod-sub">@${u} · ${isOn?'<span style="color:#00ff88">متصل</span>':'غير متصل'}</div>
+        </div>
+        <div class="tmod-check${chk?' checked':''}"></div>
+      </div>`;
+  });
+
+  list.innerHTML = html;
+
+  // حدث واحد على القائمة بدلاً من حدث لكل صف (Event Delegation)
+  list.onpointerdown = (e) => {
+    const row = e.target.closest('[data-action]');
+    if (!row) return;
+    e.preventDefault();
+
+    // تغذية راجعة بصرية فورية
+    row.style.opacity = '0.75';
+    setTimeout(() => row.style.opacity = '', 120);
+
+    const action = row.dataset.action;
+    if (action === 'all') {
+      selectedTarget = 'all';
+      selectedTargets.clear();
+    } else {
+      const u = row.dataset.u;
+      if (selectedTarget === 'all') {
+        selectedTarget = 'custom';
+        selectedTargets.clear();
+        selectedTargets.add(u);
+      } else {
+        if (selectedTargets.has(u)) {
+          selectedTargets.delete(u);
+          if (selectedTargets.size === 0) selectedTarget = 'all';
+        } else {
+          selectedTargets.add(u);
+          selectedTarget = 'custom';
+        }
+      }
+    }
+    renderTargetModal();
+    updateTargetSelector();
+  };
+}
+
+async function handleAddFriend(){
+  const u=$('add-friend-input').value.trim().toLowerCase();
+  if(!u) return;
+  try {
+    showLoading('جاري البحث...');
+    const f=await addFriend(u);
+    hideLoading();
+    $('add-friend-input').value='';
+    showToast(`تمت إضافة ${f.name} ✅`);
+    playAlarm('send');
+  } catch(e){ hideLoading(); showToast(e.message,'error'); }
+}
+async function removeFriendUI(u){
+  if(!confirm(`حذف @${u} من الأصدقاء؟`)) return;
+  await removeFriend(u);
+  showToast('تم الحذف');
+}
+
+// ─── SOS Button ───────────────────────────────────────────────
+function initSosBtn(){
+  const btn=$('sos-circle'); if(!btn) return;
+  let pressed=false;
+  const start=()=>{
+    if(pressed) return; pressed=true;
+    pressP=0; btn.classList.add('pressing');
+    clearInterval(pressInt);
+    pressInt=setInterval(()=>{
+      pressP+=1.5; updateRing(pressP);
+      if(pressP>=100){
+        clearInterval(pressInt); pressed=false;
+        btn.classList.remove('pressing'); updateRing(0);
+        triggerSOS();
+      }
+    },30);
+  };
+  const cancel=()=>{
+    if(!pressed) return; pressed=false;
+    clearInterval(pressInt); pressP=0; updateRing(0);
+    btn.classList.remove('pressing');
+  };
+  btn.addEventListener('mousedown',start);
+  btn.addEventListener('touchstart',e=>{e.preventDefault();start();},{passive:false});
+  btn.addEventListener('mouseup',cancel);
+  btn.addEventListener('mouseleave',cancel);
+  btn.addEventListener('touchend',cancel);
+  btn.addEventListener('touchcancel',cancel);
+}
+
+function updateRing(pct){
+  const c=$('prg-circle'); if(!c) return;
+  const circ=2*Math.PI*90;
+  c.style.strokeDashoffset = circ-(pct/100)*circ;
+  c.style.stroke = pct>66?'#ff0022':pct>33?'#ff6600':'#ff3366';
+}
+
+async function triggerSOS(){
+  showLoading('جاري تحديد موقعك...');
+
+  // Always try to get location
+  const loc = await new Promise(r=>{
+    if(!navigator.geolocation) return r(null);
+    navigator.geolocation.getCurrentPosition(
+      p=>r({lat:p.coords.latitude,lng:p.coords.longitude,acc:p.coords.accuracy}),
+      ()=>r(null),
+      {timeout:6000, enableHighAccuracy:true}
+    );
+  });
+
+  showLoading('جاري إرسال نداء الطوارئ...');
+
+  try {
+    const ts = Date.now();
+    const baseAlert = {
+      from:CU.username, fromName:CU.name, fromAvatar:CU.avatar||'',
+      message:`🚨 ${CU.name} يحتاج مساعدة عاجلة!`,
+      lat:loc?.lat||null, lng:loc?.lng||null, acc:loc?.acc||null,
+      timestamp:ts, responded:{}
+    };
+
+    if (selectedTarget === 'all') {
+      // Send one alert for all friends
+      const alert = { ...baseAlert, targetType:'all', targetUsername:'' };
+      if(DEMO){ _ds(`alerts/${ts}`, alert); }
+      else { const r=push(ref(_db,'alerts')); await set(r,alert); }
+    } else if (selectedTarget === 'custom' && selectedTargets.size > 0) {
+      // Send individual alert per selected person
+      let i = 0;
+      for (const uname of selectedTargets) {
+        const alert = { ...baseAlert, targetType:'user', targetUsername:uname, timestamp:ts+i };
+        if(DEMO){ _ds(`alerts/${ts+i}`, alert); }
+        else { const r=push(ref(_db,'alerts')); await set(r,alert); }
+        i++;
+      }
+    } else {
+      // Fallback
+      const alert = { ...baseAlert, targetType:'all', targetUsername:'' };
+      if(DEMO){ _ds(`alerts/${ts}`, alert); }
+      else { const r=push(ref(_db,'alerts')); await set(r,alert); }
+    }
+
+    hideLoading();
+    playAlarm('send');
+    vib([200,100,200,100,500]);
+
+    const targetLabel = selectedTarget==='all'
+      ? 'الجميع'
+      : selectedTarget==='custom'
+      ? `${selectedTargets.size} أشخاص`
+      : '@'+selectedTarget;
+    const locLabel = loc ? ' 📍 مع الموقع' : ' ⚠️ بدون موقع';
+    showToast(`🚨 تم إرسال النداء إلى ${targetLabel}${locLabel}`, 'sos');
+
+    const btn=$('sos-circle');
+    btn.classList.add('alert-active');
+    setTimeout(()=>btn.classList.remove('alert-active'),5000);
+
+    // إرسال FCM Push للأجهزة المغلقة
+    let pushTargets = [];
+    if (selectedTarget === 'all') pushTargets = Object.keys(friends);
+    else if (selectedTarget === 'custom') pushTargets = [...selectedTargets];
+    if (pushTargets.length > 0) {
+      _sendFCMToUsers(pushTargets, baseAlert).catch(() => {});
+    }
+
+  } catch(e){
+    hideLoading();
+    showToast('فشل الإرسال: '+e.message,'error');
+  }
+}
+
+async function sosDirect(u){
+  selectedTarget=u; updateTargetSelector(); await triggerSOS();
+}
+
+// ─── Incoming Alert System ────────────────────────────────────
+let shownAlertIds = new Set();
+let countdownInt  = null;
+let ringInt       = null;
+let reriseTimer   = null;
+
+// ── فلتر: هل يجب عرض هذا التنبيه؟ ──────────────────────────
+function _shouldShowAlert(id, a) {
+  if (!a || !CU) return false;
+  if (a.from === CU.username) return false;
+
+  // تحقق من قائمة الأصدقاء (كلا الاتجاهين)
+  const myFriends = friends || CU.friends || {};
+  const isFriend = !!(myFriends[a.from]);
+
+  // موجّه لي إذا: للجميع وهو صديقي، أو موجّه لاسمي تحديداً
+  const forMe = (a.targetType === 'all' && isFriend)
+             || (a.targetType === 'user' && a.targetUsername === CU.username);
+
+  if (!forMe) return false;
+  if (a.responded?.[CU.username]) return false;
+  if (Date.now() - a.timestamp > 300000) return false; // 5 دقائق max
+  if (shownAlertIds.has(id)) return false;
+  return true;
+}
+
+// ── معالج التنبيه الوارد من Firebase ─────────────────────────
+function _processIncomingAlert(id, a) {
+  if (!_shouldShowAlert(id, a)) return;
+  showIncomingAlert({ id, ...a });
+}
+
+// ── عرض الشاشة المنبثقة ───────────────────────────────────────
+function showIncomingAlert(alert) {
+  if (shownAlertIds.has(alert.id)) return;
+  shownAlertIds.add(alert.id);
+  activeAlert = alert;
+
+  // 0. إشعار عائم عاجل (يظهر فوراً حتى قبل الشاشة المنبثقة)
+  if (typeof showFloatNotif === 'function') {
+    showFloatNotif({
+      type: 'sos',
+      title: '🚨 ' + (alert.fromName || alert.from),
+      body: alert.message || 'يحتاج مساعدة عاجلة!',
+      avatar: alert.fromAvatar || '',
+      from: alert.from,
+      persistent: true,
+      onClick: () => {
+        if (activeAlert) {
+          _fillAlertCard(activeAlert);
+          _showAlertScreen(activeAlert);
+          startAlarmLoop();
+        }
+      }
+    });
+  }
+
+  // 1. ملء بيانات البطاقة أولاً
+  _fillAlertCard(alert);
+
+  // 2. أظهر الشاشة المنبثقة فوراً (قبل أي شيء آخر)
+  _showAlertScreen(alert);
+
+  // 3. صوت + اهتزاز
+  startAlarmLoop();
+
+  // 4. إشعار النظام (يظهر فوق التطبيقات حتى لو الشاشة مقفلة)
+  _sendRichNotif(alert);
+}
+
+function _fillAlertCard(alert) {
+  $('al-name').textContent = alert.fromName || alert.from;
+  $('al-user').textContent = '@' + alert.from;
+  $('al-msg').textContent  = alert.message || '🚨 يحتاج مساعدة عاجلة!';
+  $('al-time').textContent = new Date(alert.timestamp).toLocaleTimeString('ar');
+  setAvatarEl($('al-avatar'), alert.fromAvatar, alert.fromName);
+
+  const hasLoc = alert.lat && alert.lng;
+  if (hasLoc) {
+    $('al-coords').textContent = `📍 ${Number(alert.lat).toFixed(5)}, ${Number(alert.lng).toFixed(5)}`;
+    $('al-coords').style.display = 'block';
+    $('al-loc-btn').style.display = 'flex';
+    $('al-loc-btn').onclick = () =>
+      window.open(`https://maps.google.com/?q=${alert.lat},${alert.lng}`, '_blank');
+  } else {
+    $('al-coords').style.display = 'none';
+    $('al-loc-btn').style.display = 'none';
+  }
+
+  // زر الاستلام — ربط مباشر ومانع للتكرار
+  const respondBtn = $('al-respond');
+  const dismissBtn = $('al-dismiss');
+  const newRespond = respondBtn.cloneNode(true);
+  const newDismiss = dismissBtn.cloneNode(true);
+  respondBtn.parentNode.replaceChild(newRespond, respondBtn);
+  dismissBtn.parentNode.replaceChild(newDismiss, dismissBtn);
+
+  newRespond.onclick = (e) => { e.preventDefault(); acceptAlert(alert); };
+  newDismiss.onclick = (e) => {
+    e.preventDefault();
+    _hideAlertScreen();
+    clearTimeout(reriseTimer);
+    reriseTimer = setTimeout(() => {
+      if (activeAlert && activeAlert.id === alert.id) {
+        startAlarmLoop();
+        _showAlertScreen(alert);
+      }
+    }, 15000);
+  };
+}
+
+function _showAlertScreen(alert) {
+  const modal = $('alert-modal');
+  if (!modal) return;
+
+  // إزالة أي حالة سابقة
+  modal.classList.remove('show', 'flash');
+  modal.style.display = 'flex';
+  modal.style.zIndex  = '999999';
+
+  // Force reflow لضمان انطلاق الـ CSS animation
+  void modal.offsetHeight;
+
+  modal.classList.add('show');
+  _startRingProgressBar(10);
+  _startCountdown();
+
+  // وميض الشاشة
+  requestAnimationFrame(() => {
+    modal.classList.add('flash');
+    setTimeout(() => modal.classList.remove('flash'), 800);
+  });
+}
+
+function _hideAlertScreen() {
+  clearInterval(ringInt);
+  clearInterval(countdownInt);
+  $('alert-modal').classList.remove('show');
+}
+
+function _startRingProgressBar(seconds) {
+  clearInterval(ringInt);
+  const bar = $('al-ring-progress');
+  if (!bar) return;
+  let elapsed = 0;
+  const step = 80;
+  const total = seconds * 1000;
+  bar.style.transition = 'none';
+  bar.style.width = '100%';
+  ringInt = setInterval(() => {
+    elapsed += step;
+    const pct = Math.max(0, 100 - (elapsed / total) * 100);
+    bar.style.width = pct + '%';
+    if (elapsed >= total) clearInterval(ringInt);
+  }, step);
+}
+
+function _startCountdown() {
+  clearInterval(countdownInt);
+  const el = $('al-countdown');
+  if (!el) return;
+  let sec = 10;
+  el.textContent = `🔊 يرن... (${sec}ث)`;
+  el.style.color = '#ff3366';
+  countdownInt = setInterval(() => {
+    sec--;
+    if (sec > 0) {
+      el.textContent = `🔊 يرن... (${sec}ث)`;
+    } else {
+      clearInterval(countdownInt);
+      el.textContent = '🔁 سيعود بعد 15ث إذا لم تستجب';
+      el.style.color = '#ff9900';
+    }
+  }, 1000);
+}
+
+// ── إشعار النظام الغني ────────────────────────────────────────
+async function _sendRichNotif(alert) {
+  // أضف للقائمة الداخلية (تبويب النداءات في الجرس)
+  _addSOSNotif(alert);
+
+  // Wake Lock — إبقاء الشاشة مضاءة
+  try { if (navigator.wakeLock) await navigator.wakeLock.request('screen'); } catch(e) {}
+
+  // إشعار نظام — يظهر فوق كل التطبيقات
+  const _hasLoc = alert.lat && alert.lng;
+  _showDirectNotif(
+    '🚨 نداء طوارئ من ' + (alert.fromName || alert.from),
+    (alert.message || 'يحتاج مساعدة عاجلة!') + (_hasLoc ? ' 📍 مع الموقع' : ' ⚠️ بدون موقع'),
+    { type: 'sos', alertId: alert.id, from: alert.from, tag: 'rescue-sos-' + (alert.id || Date.now()) },
+    true
+  );
+
+  // استئناف AudioContext إن كان موقوفاً
+  if (_actx && _actx.state === 'suspended') _actx.resume().catch(() => {});
+}
+
+// ── استلام النداء ─────────────────────────────────────────────
+async function acceptAlert(alert) {
+  // 1. أوقف الصوت والاهتزاز فوراً
+  stopAlarmLoop();
+  clearInterval(ringInt);
+  clearInterval(countdownInt);
+  clearTimeout(reriseTimer);
+  try { if (navigator.vibrate) navigator.vibrate(0); } catch(e) {}
+
+  // 2. أغلق الشاشة المنبثقة
+  activeAlert = null;
+  const modal = $('alert-modal');
+  if (modal) { modal.classList.remove('show'); modal.style.display = 'none'; }
+
+  // 3. سجّل الاستجابة في Firebase
+  try {
+    if (!DEMO && alert.id) {
+      const u = {};
+      u[`responded/${CU.username}`] = { name: CU.name, at: Date.now() };
+      await update(ref(_db, `alerts/${alert.id}`), u);
+    } else if (DEMO && alert.id) {
+      const cur = _dg(`alerts/${alert.id}`) || {};
+      if (!cur.responded) cur.responded = {};
+      cur.responded[CU.username] = { name: CU.name, at: Date.now() };
+      _ds(`alerts/${alert.id}`, cur);
+    }
+  } catch(e) {}
+
+  // 4. افتح الموقع مباشرة أو أظهر toast
+  if (alert.lat && alert.lng) {
+    showToast('✅ تم الاستلام — جاري فتح موقع ' + alert.fromName, 'success');
+    setTimeout(() => {
+      window.open('https://maps.google.com/?q=' + alert.lat + ',' + alert.lng, '_blank');
+    }, 300);
+  } else {
+    showToast('✅ استلمت نداء ' + alert.fromName + ' — لا يوجد موقع', 'warning');
+  }
+}
+
+async function dismissAlert(id) {
+  stopAlarmLoop();
+  clearInterval(ringInt);
+  clearInterval(countdownInt);
+  clearTimeout(reriseTimer);
+  try {
+    if (!DEMO && id) {
+      const u = {};
+      u[`responded/${CU.username}`] = { name: CU.name, at: Date.now() };
+      await update(ref(_db, `alerts/${id}`), u);
+    }
+  } catch(e) {}
+  activeAlert = null;
+  $('alert-modal').classList.remove('show');
+  if (navigator.vibrate) navigator.vibrate(0);
+}
+
+function hideAlertScreen() { _hideAlertScreen(); }
+
+// ─── Tabs ─────────────────────────────────────────────────────
+function initTabs(){
+  ['home','friends','history','profile'].forEach(t=>{
+    $(` tab-${t}`);
+    $('tab-'+t).onclick=()=>switchTab(t);
+  });
+  switchTab('home');
+}
+function switchTab(t){
+  document.querySelectorAll('.tab-btn').forEach(b=>b.classList.remove('active'));
+  document.querySelectorAll('.tab-content').forEach(c=>c.classList.remove('active'));
+  $('tab-'+t).classList.add('active');
+  $('content-'+t).classList.add('active');
+  if(t==='history') loadHistory();
+  if(t==='profile') loadProfileTab();
+}
+
+// ─── History ──────────────────────────────────────────────────
+function loadHistory(){
+  const c=$('history-container'); if(!c) return;
+  c.innerHTML='<div class="loading-spin"></div>';
+  dbListen('alerts', alerts=>{
+    if(!alerts){ c.innerHTML='<div class="empty-state">📋<br>لا يوجد سجل</div>'; return; }
+    const mine=Object.entries(alerts)
+      .filter(([,a])=>{
+        if(!a) return false;
+        const sent=a.from===CU.username;
+        const recv=(a.targetType==='all'&&!!(friends[a.from]))||(a.targetType==='user'&&a.targetUsername===CU.username);
+        return sent||recv;
+      })
+      .sort(([,a],[,b])=>b.timestamp-a.timestamp).slice(0,30);
+    if(!mine.length){ c.innerHTML='<div class="empty-state">📋<br>لا يوجد سجل</div>'; return; }
+    c.innerHTML='';
+    mine.forEach(([,a])=>{
+      const sent=a.from===CU.username;
+      const d=document.createElement('div');
+      d.className=`history-item ${sent?'sent':'recv'}`;
+      d.innerHTML=`
+        <div style="font-size:22px">${sent?'📤':'📥'}</div>
+        <div style="flex:1">
+          <div style="font-weight:700;font-size:14px">${sent?'أرسلت نداءً':'نداء من '+a.fromName}</div>
+          <div style="font-size:11px;color:var(--t2);margin-top:3px">
+            ${new Date(a.timestamp).toLocaleString('ar')} · إلى: ${a.targetType==='all'?'الجميع':'@'+a.targetUsername}
+          </div>
+          ${a.lat?`<a href="https://maps.google.com/?q=${a.lat},${a.lng}" target="_blank" class="loc-link">📍 عرض الموقع</a>`:''}
+        </div>`;
+      c.appendChild(d);
+    });
+  });
+}
+
+// ─── Profile Tab ──────────────────────────────────────────────
+function loadProfileTab(){
+  if(!CU) return;
+  $('pf-name').textContent=CU.name;
+  $('pf-username').textContent='@'+CU.username;
+  $('pf-joined').textContent='انضم '+new Date(CU.createdAt||Date.now()).toLocaleDateString('ar');
+  $('pf-friends-n').textContent=Object.keys(friends).length;
+  setAvatarEl($('pf-avatar'), CU.avatar, CU.name);
+}
+
+// ─── Edit Profile ─────────────────────────────────────────────
+function openEditProfile(){
+  editAvatarDataUrl = CU.avatar || '';
+  $('edit-name').value=CU.name;
+  $('edit-username').value=CU.username;
+  $('edit-username-preview').textContent='@'+CU.username;
+  setAvatarEl($('edit-avatar-disp'), CU.avatar, CU.name);
+  $('edit-modal').style.display='flex';
+  $('edit-modal').classList.add('show');
+
+  $('edit-avatar-btn').onclick=()=>$('edit-avatar-file').click();
+  $('edit-avatar-file').onchange=async e=>{
+    const f=e.target.files[0]; if(!f) return;
+    const reader=new FileReader();
+    reader.onload=async ev=>{
+      editAvatarDataUrl=ev.target.result;
+      const el=$('edit-avatar-disp');
+      el.style.backgroundImage=`url(${editAvatarDataUrl})`;
+      el.textContent='';
+    };
+    reader.readAsDataURL(f);
+  };
+  $('edit-username').addEventListener('input',()=>{
+    const v=$('edit-username').value.replace(/[^a-z0-9_]/g,'');
+    $('edit-username').value=v;
+    $('edit-username-preview').textContent=v?`@${v}`:'';
+  });
+  $('edit-save').onclick=saveEditProfile;
+  $('edit-close').onclick=()=>{ $('edit-modal').style.display='none'; };
+}
+
+async function saveEditProfile(){
+  const newName=$('edit-name').value.trim();
+  const newUser=$('edit-username').value.trim().toLowerCase();
+  if(!newName) return showToast('الاسم مطلوب','error');
+  if(!newUser||newUser.length<3) return showToast('اليوزر 3 أحرف على الأقل','error');
+  if(!/^[a-z0-9_]+$/.test(newUser)) return showToast('اليوزر: أحرف وأرقام و _ فقط','error');
+
+  try {
+    showLoading('جاري الحفظ...');
+    const oldUser=CU.username;
+
+    // Check username uniqueness if changed
+    if(newUser!==oldUser){
+      const existing=await dbGet(`users/${newUser}`);
+      if(existing){ hideLoading(); return showToast('هذا اليوزر محجوز','error'); }
+    }
+
+    // Handle avatar change
+    let newAvatar=CU.avatar||'';
+    if(editAvatarDataUrl && editAvatarDataUrl!==CU.avatar){
+      newAvatar=await saveAvatar(newUser, editAvatarDataUrl);
+    }
+
+    // If username changed: copy data to new key, delete old
+    if(newUser!==oldUser){
+      const userData=await dbGet(`users/${oldUser}`);
+      userData.name=newName;
+      userData.username=newUser;
+      userData.avatar=newAvatar;
+      await dbSet(`users/${newUser}`, userData);
+      await dbRemove(`users/${oldUser}`);
+      // Move avatar in Firestore
+      if(editAvatarDataUrl!==CU.avatar){
+        await fsDel('avatars', oldUser);
+      }
+      // Update friends lists of others (best-effort)
+      // Update session
+      CU={...userData};
+    } else {
+      await dbUpdate(`users/${oldUser}`,{name:newName, avatar:newAvatar});
+      CU.name=newName;
+      CU.avatar=newAvatar;
+    }
+    CU.username=newUser;
+
+    saveSess({username:newUser, passHash:CU.passHash});
+    hideLoading();
+    $('edit-modal').style.display='none';
+    updateTopbar();
+    loadProfileTab();
+    showToast('تم حفظ التعديلات ✅');
+  } catch(e){
+    hideLoading();
+    showToast('خطأ: '+e.message,'error');
+  }
+}
+
+// ─── Logout ───────────────────────────────────────────────────
+function logout(){
+  if(!confirm('تسجيل الخروج؟')) return;
+  if(CU) dbUpdate(`users/${CU.username}`,{online:false,lastSeen:Date.now()});
+  clearInterval(presInterval);
+  if(alertUnsub) alertUnsub();
+  clearSess();
+  CU=null; friends={}; friendsData={}; selectedTarget='all';
+  initLogin();
+}
+
+// ─── Utils ────────────────────────────────────────────────────
+function timeAgo(ts){
+  const d=Date.now()-ts;
+  if(d<60000) return 'منذ لحظة';
+  if(d<3600000) return `منذ ${Math.floor(d/60000)} د`;
+  if(d<86400000) return `منذ ${Math.floor(d/3600000)} س`;
+  return `منذ ${Math.floor(d/86400000)} ي`;
+}
+
+// ─── Startup ──────────────────────────────────────────────────
+
+// ══════════════════════════════════════════════════════════════
+// FRIEND SEARCH
+// ══════════════════════════════════════════════════════════════
+function filterFriendsList(query) {
+  const clearBtn = document.getElementById('friend-search-clear');
+  if (clearBtn) clearBtn.style.display = query ? 'block' : 'none';
+
+  const q = query.trim().toLowerCase();
+  const c = document.getElementById('friends-list-container');
+  if (!c) return;
+
+  if (!Object.keys(friends).length) return;
+
+  c.innerHTML = '';
+  let found = 0;
+
+  Object.entries(friends).forEach(([u, f]) => {
+    const nameMatch = (f.name || '').toLowerCase().includes(q);
+    const userMatch = u.toLowerCase().includes(q);
+    if (q && !nameMatch && !userMatch) return;
+    found++;
+
+    const isOn = friendsData[u]?.online;
+    const ls = friendsData[u]?.lastSeen;
+    const unread = _chatUnread[u] || 0;
+    const div = document.createElement('div');
+    div.className = 'friend-item';
+
+    // Highlight matching text
+    const highlightName = q ? _highlight(f.name, q) : (f.name || u);
+    const highlightUser = q ? _highlight('@'+u, q) : '@'+u;
+
+    div.innerHTML = `
+      <div class="fav-wrap">
+        ${f.avatar ? `<img src="${f.avatar}" class="fav-img">` : `<div class="fav-ph">${(f.name||u)[0].toUpperCase()}</div>`}
+        <span class="odot ${isOn?'on':'off'}" style="position:absolute;bottom:1px;right:1px;width:12px;height:12px;border:2px solid var(--bg)"></span>
+      </div>
+      <div class="finfo">
+        <div class="fname">${highlightName}</div>
+        <div class="funm">${highlightUser} · ${isOn ? '<span style="color:#00ff88">متصل</span>' : ls ? timeAgo(ls) : ''}</div>
+      </div>
+      <div class="factions">
+        <div style="position:relative;display:inline-flex">
+          <button class="chat-open-btn" onclick="openChat('${u}')" title="محادثة">💬</button>
+          ${unread > 0 ? `<span class="chat-unread">${unread}</span>` : ''}
+        </div>
+        <button class="sos-to-btn" onclick="sosDirect('${u}')">🚨</button>
+        <button class="rm-btn" onclick="removeFriendUI('${u}')">✕</button>
+      </div>`;
+    c.appendChild(div);
+  });
+
+  if (found === 0) {
+    c.innerHTML = `<div class="empty-state">🔍<br>لا توجد نتائج لـ "${query}"</div>`;
+  }
+}
+
+function _highlight(text, q) {
+  if (!q) return text;
+  const idx = text.toLowerCase().indexOf(q.toLowerCase());
+  if (idx === -1) return text;
+  return text.substring(0, idx) +
+    `<span style="color:var(--red);font-weight:900">${text.substring(idx, idx + q.length)}</span>` +
+    text.substring(idx + q.length);
+}
+
+// ══════════════════════════════════════════════════════════════
+// CHAT SYSTEM
+// ══════════════════════════════════════════════════════════════
+let _chatFriend = null;       // current chat friend username
+let _chatUnsub = null;        // firebase listener
+let _chatCache = {};          // {uname: [{id,from,text,ts,type}]}
+let _chatUnread = {};         // {uname: count}
+let _chatListeners = {};      // friend unsub listeners
+
+function _chatId(a, b) { return [a, b].sort().join('__'); }
+
+// ── Open chat ────────────────────────────────────────────────
+function openChat(friendUsername) {
+  if (!CU || !friends[friendUsername]) return;
+  _chatFriend = friendUsername;
+  const f = friends[friendUsername];
+  const isOn = friendsData[friendUsername]?.online;
+  const ls = friendsData[friendUsername]?.lastSeen;
+
+  // Topbar
+  setAvatarEl(document.getElementById('chat-topbar-av'), f.avatar, f.name);
+  document.getElementById('chat-topbar-name').textContent = f.name;
+  document.getElementById('chat-topbar-status').innerHTML = isOn
+    ? '<span style="color:var(--green)">● متصل الآن</span>'
+    : ls ? `آخر ظهور: ${timeAgo(ls)}` : 'غير متصل';
+  document.getElementById('chat-empty-name').textContent = f.name;
+
+  // Particles
+  _buildChatParticles();
+
+  // Show screen (z-index 5000 covers everything)
+  document.getElementById('screen-chat').classList.add('chat-open');
+  setTimeout(() => document.getElementById('chat-inp')?.focus(), 350);
+
+  // Reset unread
+  _chatUnread[friendUsername] = 0;
+  _markChatRead(friendUsername);
+  renderFriendsList();
+
+  // Subscribe messages
+  _subscribeChatMsgs(friendUsername);
+}
+
+function closeChat() {
+  document.getElementById('screen-chat').classList.remove('chat-open');
+  if (_chatUnsub) { _chatUnsub(); _chatUnsub = null; }
+  _chatFriend = null;
+}
+
+function _buildChatParticles() {
+  const bg = document.getElementById('chat-bg');
+  if (!bg) return;
+  bg.innerHTML = '';
+  for (let i = 0; i < 14; i++) {
+    const p = document.createElement('div');
+    p.className = 'chat-particle';
+    const s = 18 + Math.random() * 90;
+    p.style.cssText = `width:${s}px;height:${s}px;left:${Math.random()*100}%;top:${Math.random()*100}%;animation-delay:${Math.random()*7}s;animation-duration:${7+Math.random()*7}s;`;
+    bg.appendChild(p);
+  }
+}
+
+// ── Subscribe messages ────────────────────────────────────────
+function _subscribeChatMsgs(friendUsername) {
+  if (_chatUnsub) { _chatUnsub(); _chatUnsub = null; }
+  const cid = _chatId(CU.username, friendUsername);
+  _chatUnsub = dbListen(`chats/${cid}/messages`, data => {
+    const msgs = data ? Object.entries(data).map(([id, m]) => ({ id, ...m })).sort((a, b) => a.ts - b.ts) : [];
+    _chatCache[friendUsername] = msgs;
+    _renderChatMsgs(msgs);
+    _markChatRead(friendUsername);
+  });
+}
+
+// ── Render messages ───────────────────────────────────────────
+function _renderChatMsgs(msgs) {
+  const wrap = document.getElementById('chat-msgs-wrap');
+  if (!wrap) return;
+  const emptyEl = document.getElementById('chat-empty-state');
+
+  // Remove all message nodes (keep empty state)
+  Array.from(wrap.children).forEach(c => { if (c.id !== 'chat-empty-state') c.remove(); });
+
+  if (!msgs || !msgs.length) {
+    if (emptyEl) emptyEl.style.display = 'flex';
+    return;
+  }
+  if (emptyEl) emptyEl.style.display = 'none';
+
+  const f = friends[_chatFriend] || {};
+  let lastDate = '';
+
+  msgs.forEach(msg => {
+    const isSent = msg.from === CU.username;
+    const d = new Date(msg.ts);
+    const dateStr = d.toLocaleDateString('ar', { weekday: 'short', day: 'numeric', month: 'long' });
+
+    if (dateStr !== lastDate) {
+      lastDate = dateStr;
+      const sep = document.createElement('div');
+      sep.className = 'chat-date-sep';
+      sep.innerHTML = `<span>${dateStr}</span>`;
+      wrap.appendChild(sep);
+    }
+
+    const timeStr = d.toLocaleTimeString('ar', { hour: '2-digit', minute: '2-digit' });
+    const isSOSmsg = msg.type === 'sos';
+
+    const row = document.createElement('div');
+    row.className = `msg-row ${isSent ? 'sent' : 'recv'}`;
+
+    const avHTML = !isSent
+      ? `<div class="msg-mini-av" style="${f.avatar ? `background-image:url(${f.avatar})` : ''}">${!f.avatar ? (f.name || '?')[0].toUpperCase() : ''}</div>`
+      : '';
+
+    const bubbleHTML = isSOSmsg
+      ? `<div class="msg-bubble msg-sos"><span class="msg-sos-icon">🚨</span>${_esc(msg.text)}</div>`
+      : `<div class="msg-bubble">${_esc(msg.text)}</div>`;
+
+    const tickHTML = isSent
+      ? `<span class="msg-tick ${msg.readAt ? 'seen' : ''}"> ${msg.readAt ? '✓✓' : '✓'}</span>`
+      : '';
+
+    row.innerHTML = `${avHTML}<div class="msg-content">${bubbleHTML}<div class="msg-meta"><span>${timeStr}</span>${tickHTML}</div></div>`;
+    wrap.appendChild(row);
+  });
+
+  requestAnimationFrame(() => { wrap.scrollTop = wrap.scrollHeight; });
+}
+
+function _esc(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>');
+}
+
+// ── Send message ──────────────────────────────────────────────
+async function sendChatMsg() {
+  if (!CU || !_chatFriend) return;
+  const inp = document.getElementById('chat-inp');
+  const text = inp ? inp.value.trim() : '';
+  if (!text) return;
+  inp.value = '';
+
+  const cid = _chatId(CU.username, _chatFriend);
+  const msg = { from: CU.username, text, ts: Date.now(), type: 'text' };
+  try {
+    if (DEMO) {
+      const ex = _dg(`chats/${cid}/messages`) || {};
+      ex[`m_${Date.now()}`] = msg;
+      _ds(`chats/${cid}/messages`, ex);
+    } else {
+      await set(push(ref(_db, `chats/${cid}/messages`)), msg);
+    }
+    playAlarm('send');
+  } catch(e) { showToast('فشل الإرسال: ' + e.message, 'error'); }
+}
+
+// ── Send SOS via chat ─────────────────────────────────────────
+async function sendChatSOS() {
+  if (!CU || !_chatFriend) return;
+  const cid = _chatId(CU.username, _chatFriend);
+  const msg = {
+    from: CU.username,
+    text: `🚨 ${CU.name} يحتاج مساعدة عاجلة! — نداء طوارئ عبر المحادثة`,
+    ts: Date.now(), type: 'sos'
+  };
+  try {
+    if (DEMO) {
+      const ex = _dg(`chats/${cid}/messages`) || {};
+      ex[`m_${Date.now()}`] = msg;
+      _ds(`chats/${cid}/messages`, ex);
+    } else {
+      await set(push(ref(_db, `chats/${cid}/messages`)), msg);
+    }
+    playAlarm('send');
+    showToast('🚨 تم إرسال نداء الطوارئ عبر المحادثة!', 'sos');
+  } catch(e) { showToast('فشل الإرسال', 'error'); }
+}
+
+// ── Mark read ─────────────────────────────────────────────────
+async function _markChatRead(friendUsername) {
+  if (!CU) return;
+  const cid = _chatId(CU.username, friendUsername);
+  try { await dbUpdate(`chats/${cid}/meta`, { [`readBy_${CU.username}`]: Date.now() }); } catch(e) {}
+}
+
+// ── Global chat listeners (for unread badges) ─────────────────
+function _startChatListeners() {
+  if (!CU) return;
+  Object.keys(friends).forEach(fu => {
+    if (_chatListeners[fu]) return;
+    const cid = _chatId(CU.username, fu);
+    _chatListeners[fu] = dbListen(`chats/${cid}/messages`, data => {
+      if (!data) return;
+      const msgs = Object.entries(data).map(([id, m]) => ({ id, ...m })).sort((a, b) => a.ts - b.ts);
+      if (_chatFriend === fu) {
+        _chatCache[fu] = msgs;
+        _renderChatMsgs(msgs);
+        _markChatRead(fu);
+        return;
+      }
+      const lastMsg = msgs[msgs.length - 1];
+      if (!lastMsg || lastMsg.from === CU.username) return;
+      // count unread
+      dbGet(`chats/${cid}/meta`).then(meta => {
+        const lastRead = meta?.[`readBy_${CU.username}`] || 0;
+        const unread = msgs.filter(m => m.from !== CU.username && m.ts > lastRead).length;
+        _chatUnread[fu] = unread;
+        // Notify
+        if (unread > 0) {
+          const s = _getCS(fu);
+          if (s.notif) _addChatNotif(fu, lastMsg.text, lastMsg.id);
+          if (s.sound) playAlarm('send');
+          if (s.vib) vib([100, 60, 100]);
+        }
+        renderFriendsList();
+      });
+    });
+  });
+}
+
+// ── Chat Settings helpers ─────────────────────────────────────
+function _getCS(fu) {
+  const k = `_cs_${CU?.username}_${fu}`;
+  const s = localStorage.getItem(k);
+  return s ? JSON.parse(s) : { notif: true, sound: true, vib: true, read: true };
+}
+function _saveCS(fu, s) {
+  localStorage.setItem(`_cs_${CU?.username}_${fu}`, JSON.stringify(s));
+}
+
+function openChatSettings() {
+  if (!_chatFriend || !CU) return;
+  const f = friends[_chatFriend];
+  const isOn = friendsData[_chatFriend]?.online;
+  const ls = friendsData[_chatFriend]?.lastSeen;
+  const s = _getCS(_chatFriend);
+
+  setAvatarEl(document.getElementById('cs-friend-av'), f?.avatar, f?.name);
+  document.getElementById('cs-friend-name').textContent = f?.name || _chatFriend;
+  document.getElementById('cs-friend-uname').textContent = `@${_chatFriend}`;
+  document.getElementById('cs-friend-status').innerHTML = isOn
+    ? '<span style="color:var(--green)">● متصل الآن</span>'
+    : ls ? `آخر ظهور: ${timeAgo(ls)}` : 'غير متصل';
+
+  const msgs = _chatCache[_chatFriend] || [];
+  const sent = msgs.filter(m => m.from === CU.username).length;
+  const recv = msgs.filter(m => m.from !== CU.username).length;
+  document.getElementById('cs-stats-grid').innerHTML = `
+    <div class="cs-stat"><div class="cs-stat-n">${msgs.length}</div><div class="cs-stat-l">إجمالي الرسائل</div></div>
+    <div class="cs-stat"><div class="cs-stat-n">${sent}</div><div class="cs-stat-l">رسائل أرسلتها</div></div>
+    <div class="cs-stat"><div class="cs-stat-n">${recv}</div><div class="cs-stat-l">رسائل استقبلتها</div></div>
+    <div class="cs-stat"><div class="cs-stat-n">${msgs.filter(m=>m.type==='sos').length}</div><div class="cs-stat-l">نداءات طوارئ</div></div>`;
+
+  ['notif','sound','vib','read'].forEach(k => {
+    const el = document.getElementById(`cs-t-${k}`);
+    if (el) el.className = `cs-toggle ${s[k] !== false ? 'on' : ''}`;
+  });
+
+  document.getElementById('cs-overlay').classList.add('show');
+}
+
+function closeChatSettings() {
+  document.getElementById('cs-overlay').classList.remove('show');
+}
+
+function toggleCS(key) {
+  if (!_chatFriend) return;
+  const s = _getCS(_chatFriend);
+  s[key] = s[key] === false ? true : false;
+  _saveCS(_chatFriend, s);
+  const el = document.getElementById(`cs-t-${key}`);
+  if (el) el.className = `cs-toggle ${!s[key] ? '' : 'on'}`;
+}
+
+async function clearChatHistory() {
+  if (!_chatFriend || !CU) return;
+  if (!confirm('هل تريد حذف جميع رسائل هذه المحادثة؟')) return;
+  const cid = _chatId(CU.username, _chatFriend);
+  try {
+    await dbRemove(`chats/${cid}/messages`);
+    _chatCache[_chatFriend] = [];
+    _renderChatMsgs([]);
+    closeChatSettings();
+    showToast('تم حذف سجل المحادثة ✅');
+  } catch(e) { showToast('فشل الحذف: ' + e.message, 'error'); }
+}
+
+async function blockAndRemoveFriend() {
+  if (!_chatFriend) return;
+  if (!confirm(`هل تريد حظر @${_chatFriend} وحذفه من الأصدقاء؟`)) return;
+  const fu = _chatFriend;
+  closeChatSettings();
+  closeChat();
+  await removeFriend(fu);
+  renderFriendsList();
+  showToast(`تم حذف @${fu}`);
+}
+
+// ── Override renderFriendsList to include chat UI ─────────────
+function renderFriendsList() {
+  const c = document.getElementById('friends-list-container');
+  if (!c) return;
+  const searchVal = (document.getElementById('friend-search-inp')?.value || '').trim();
+  if (searchVal) { filterFriendsList(searchVal); return; }
+
+  if (!Object.keys(friends).length) {
+    c.innerHTML = '<div class="empty-state">👥<br>لا يوجد أصدقاء بعد<br><small>أضف أصدقاءك عبر اليوزر</small></div>';
+    return;
+  }
+  c.innerHTML = '';
+  Object.entries(friends).forEach(([u, f]) => {
+    const isOn = friendsData[u]?.online;
+    const ls = friendsData[u]?.lastSeen;
+    const unread = _chatUnread[u] || 0;
+    const div = document.createElement('div');
+    div.className = 'friend-item';
+    div.innerHTML = `
+      <div class="fav-wrap">
+        ${f.avatar ? `<img src="${f.avatar}" class="fav-img">` : `<div class="fav-ph">${(f.name || u)[0].toUpperCase()}</div>`}
+        <span class="odot ${isOn ? 'on' : 'off'}" style="position:absolute;bottom:1px;right:1px;width:12px;height:12px;border:2px solid var(--bg)"></span>
+      </div>
+      <div class="finfo">
+        <div class="fname">${f.name}</div>
+        <div class="funm">@${u} · ${isOn ? '<span style="color:#00ff88">متصل</span>' : ls ? timeAgo(ls) : ''}</div>
+      </div>
+      <div class="factions">
+        <div style="position:relative;display:inline-flex">
+          <button class="chat-open-btn" onclick="openChat('${u}')" title="محادثة">💬</button>
+          ${unread > 0 ? `<span class="chat-unread">${unread}</span>` : ''}
+        </div>
+        <button class="sos-to-btn" onclick="sosDirect('${u}')">🚨</button>
+        <button class="rm-btn" onclick="removeFriendUI('${u}')">✕</button>
+      </div>`;
+    c.appendChild(div);
+  });
+}
+
+window.openChat = openChat;
+window.closeChat = closeChat;
+window.sendChatMsg = sendChatMsg;
+window.sendChatSOS = sendChatSOS;
+window.openChatSettings = openChatSettings;
+window.closeChatSettings = closeChatSettings;
+window.toggleCS = toggleCS;
+window.clearChatHistory = clearChatHistory;
+window.blockAndRemoveFriend = blockAndRemoveFriend;
+window.filterFriendsList = filterFriendsList;
+
+// ══════════════════════════════════════════════════════════════
+// NOTIFICATION SYSTEM — دردشة + نداءات
+// ══════════════════════════════════════════════════════════════
+// هيكل الإشعار: { id, type:'chat'|'sos', title, body, from, ts, read, data:{} }
+const NOTIF_KEY = '_rsc_notifs_v2';
+const NOTIF_EXPIRE_MS = 30 * 24 * 60 * 60 * 1000; // شهر واحد
+let _activeNotifTab = 'chat';
+
+// ── تحميل/حفظ الإشعارات ──────────────────────────────────────
+function _loadNotifs() {
+  try {
+    const raw = localStorage.getItem(NOTIF_KEY);
+    if (!raw) return [];
+    const all = JSON.parse(raw);
+    // مسح الإشعارات القديمة (أكثر من شهر)
+    const now = Date.now();
+    const valid = all.filter(n => (now - n.ts) < NOTIF_EXPIRE_MS);
+    if (valid.length !== all.length) _saveNotifs(valid);
+    return valid;
+  } catch(e) { return []; }
+}
+
+function _saveNotifs(arr) {
+  try { localStorage.setItem(NOTIF_KEY, JSON.stringify(arr)); } catch(e) {}
+}
+
+function _addNotif(n) {
+  if (!CU) return;
+  // احفظ فقط إشعارات المستخدم الحالي
+  const key = `_rsc_notifs_${CU.username}`;
+  try {
+    const raw = localStorage.getItem(key);
+    let arr = raw ? JSON.parse(raw) : [];
+    // تجنب التكرار بنفس id
+    if (n.id && arr.find(x => x.id === n.id)) return;
+    arr.unshift({ ...n, read: false, ts: n.ts || Date.now() });
+    // احتفظ بأحدث 200 إشعار
+    if (arr.length > 200) arr = arr.slice(0, 200);
+    // مسح القديمة
+    const now = Date.now();
+    arr = arr.filter(x => (now - x.ts) < NOTIF_EXPIRE_MS);
+    localStorage.setItem(key, JSON.stringify(arr));
+    _updateBell();
+    _renderNotifList();
+  } catch(e) {}
+}
+
+function _getNotifs(type) {
+  if (!CU) return [];
+  try {
+    const raw = localStorage.getItem(`_rsc_notifs_${CU.username}`);
+    const arr = raw ? JSON.parse(raw) : [];
+    const now = Date.now();
+    const valid = arr.filter(x => (now - x.ts) < NOTIF_EXPIRE_MS);
+    return type ? valid.filter(x => x.type === type) : valid;
+  } catch(e) { return []; }
+}
+
+function _markNotifRead(id) {
+  if (!CU) return;
+  const key = `_rsc_notifs_${CU.username}`;
+  try {
+    const raw = localStorage.getItem(key);
+    let arr = raw ? JSON.parse(raw) : [];
+    arr = arr.map(n => n.id === id ? { ...n, read: true } : n);
+    localStorage.setItem(key, JSON.stringify(arr));
+    _updateBell();
+    _renderNotifList();
+  } catch(e) {}
+}
+
+function _markAllNotifsRead(type) {
+  if (!CU) return;
+  const key = `_rsc_notifs_${CU.username}`;
+  try {
+    const raw = localStorage.getItem(key);
+    let arr = raw ? JSON.parse(raw) : [];
+    arr = arr.map(n => (!type || n.type === type) ? { ...n, read: true } : n);
+    localStorage.setItem(key, JSON.stringify(arr));
+    _updateBell();
+    _renderNotifList();
+  } catch(e) {}
+}
+
+function _deleteNotif(id) {
+  if (!CU) return;
+  const key = `_rsc_notifs_${CU.username}`;
+  try {
+    const raw = localStorage.getItem(key);
+    let arr = raw ? JSON.parse(raw) : [];
+    arr = arr.filter(n => n.id !== id);
+    localStorage.setItem(key, JSON.stringify(arr));
+    _updateBell();
+    _renderNotifList();
+  } catch(e) {}
+}
+
+// ── تحديث زر الجرس ───────────────────────────────────────────
+function _updateBell() {
+  if (!CU) return;
+  const chatUnread = _getNotifs('chat').filter(n => !n.read).length;
+  const sosUnread  = _getNotifs('sos').filter(n => !n.read).length;
+  const total = chatUnread + sosUnread;
+
+  const bell = document.getElementById('notif-bell-btn');
+  const badge = document.getElementById('notif-count-badge');
+  if (!bell || !badge) return;
+
+  if (total > 0) {
+    bell.classList.add('has-new');
+    badge.textContent = total > 99 ? '99+' : total;
+    badge.classList.add('show');
+  } else {
+    bell.classList.remove('has-new');
+    badge.classList.remove('show');
+  }
+
+  // تحديث badges التابات
+  const chatBadge = document.getElementById('ntab-chat-badge');
+  const sosBadge  = document.getElementById('ntab-sos-badge');
+  if (chatBadge) { chatBadge.textContent = chatUnread; chatBadge.style.display = chatUnread > 0 ? 'flex' : 'none'; }
+  if (sosBadge)  { sosBadge.textContent = sosUnread;  sosBadge.style.display  = sosUnread  > 0 ? 'flex' : 'none'; }
+}
+
+// ── فتح/إغلاق panel ──────────────────────────────────────────
+function openNotifPanel() {
+  _renderNotifList();
+  document.getElementById('notif-panel-overlay').classList.add('show');
+  // اقرأ كل إشعارات الـ tab الحالي
+  _markAllNotifsRead(_activeNotifTab);
+}
+function closeNotifPanel() {
+  document.getElementById('notif-panel-overlay').classList.remove('show');
+}
+function switchNotifTab(tab) {
+  _activeNotifTab = tab;
+  document.getElementById('ntab-chat').classList.toggle('active', tab === 'chat');
+  document.getElementById('ntab-sos').classList.toggle('active', tab === 'sos');
+  _markAllNotifsRead(tab);
+  _renderNotifList();
+}
+function clearAllNotifs() {
+  if (!CU) return;
+  const all = _getNotifs();
+  // احذف فقط notifs الـ tab الحالي
+  const keep = all.filter(n => n.type !== _activeNotifTab);
+  const key = `_rsc_notifs_${CU.username}`;
+  try { localStorage.setItem(key, JSON.stringify(keep)); } catch(e) {}
+  _updateBell();
+  _renderNotifList();
+}
+
+// ── رسم قائمة الإشعارات ──────────────────────────────────────
+function _renderNotifList() {
+  const list = document.getElementById('notif-list');
+  if (!list) return;
+  const items = _getNotifs(_activeNotifTab);
+
+  if (!items.length) {
+    list.innerHTML = `<div class="notif-empty">
+      <div style="font-size:38px;opacity:.3">${_activeNotifTab === 'chat' ? '💬' : '🚨'}</div>
+      <div>لا توجد إشعارات</div>
+    </div>`;
+    return;
+  }
+
+  list.innerHTML = items.map(n => {
+    const ago = _nTimeAgo(n.ts);
+    const icoClass = n.type === 'chat' ? 'chat-ico' : '';
+    const ico = n.type === 'chat' ? '💬' : '🚨';
+    const unreadClass = !n.read ? 'unread' : '';
+    return `<div class="notif-item ${unreadClass}" onclick="_notifItemClick('${n.id}')">
+      <div class="notif-item-ico ${icoClass}">${ico}</div>
+      <div class="notif-item-body">
+        <div class="notif-item-title">${_escHtml(n.title || '')}</div>
+        <div class="notif-item-text">${_escHtml(n.body || '')}</div>
+        <div class="notif-item-time">${ago}</div>
+      </div>
+      <button class="notif-item-del" onclick="event.stopPropagation();_deleteNotif('${n.id}')">✕</button>
+    </div>`;
+  }).join('');
+}
+
+function _escHtml(s) {
+  return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+function _notifItemClick(id) {
+  _markNotifRead(id);
+  const n = _getNotifs().find(x => x.id === id);
+  if (!n) return;
+  if (n.type === 'chat' && n.data?.from && friends[n.data.from]) {
+    closeNotifPanel();
+    openChat(n.data.from);
+  } else if (n.type === 'sos') {
+    closeNotifPanel();
+    switchTab('history');
+  }
+}
+
+function _nTimeAgo(ts) {
+  const d = Date.now() - ts;
+  if (d < 60000) return 'الآن';
+  if (d < 3600000) return `منذ ${Math.floor(d/60000)} دقيقة`;
+  if (d < 86400000) return `منذ ${Math.floor(d/3600000)} ساعة`;
+  if (d < 2592000000) return `منذ ${Math.floor(d/86400000)} يوم`;
+  return new Date(ts).toLocaleDateString('ar');
+}
+
+// ── إشعار نداء طوارئ وارد ────────────────────────────────────
+function _addSOSNotif(alert) {
+  const n = {
+    id:    alert.id || String(alert.timestamp || Date.now()),
+    type:  'sos',
+    title: '🚨 نداء طوارئ من ' + (alert.fromName || alert.from),
+    body:  alert.message || 'يحتاج مساعدة عاجلة!',
+    ts:    alert.timestamp || Date.now(),
+    data:  { alertId: alert.id, from: alert.from, lat: alert.lat, lng: alert.lng }
+  };
+  _addNotif(n);  // يضيفه لتبويب "النداءات" في الجرس
+}
+
+// ── إشعار رسالة دردشة واردة ──────────────────────────────────
+function _addChatNotif(fromUsername, text, msgId) {
+  const f = friends[fromUsername] || {};
+  const n = {
+    id: msgId || `chat_${fromUsername}_${Date.now()}`,
+    type: 'chat',
+    title: `💬 ${f.name || fromUsername}`,
+    body: text,
+    ts: Date.now(),
+    data: { from: fromUsername }
+  };
+  _addNotif(n);
+
+  // إشعار عائم داخل التطبيق (مثل فيسبوك/واتساب)
+  if (typeof showFloatNotif === 'function') {
+    showFloatNotif({
+      type: 'chat',
+      title: f.name || fromUsername,
+      body: text.substring(0, 100),
+      avatar: f.avatar || '',
+      from: fromUsername,
+      onClick: () => { if (typeof openChat === 'function') openChat(fromUsername); }
+    });
+  }
+
+  // إشعار عبر النظام + SW
+  _swNotif({
+    type: 'chat',
+    title: n.title,
+    body: text.substring(0, 100),
+    from: fromUsername,
+    tag: 'chat-' + fromUsername
+  });
+}
+
+window.openNotifPanel = openNotifPanel;
+window.closeNotifPanel = closeNotifPanel;
+window.switchNotifTab = switchNotifTab;
+window.clearAllNotifs = clearAllNotifs;
+window._notifItemClick = _notifItemClick;
+window._deleteNotif = _deleteNotif;
+
+window.handleAddFriend=handleAddFriend;
+window.removeFriendUI=removeFriendUI;
+window.sosDirect=sosDirect;
+window.logout=logout;
+window.dismissAlert=dismissAlert;
+window.openEditProfile=openEditProfile;
+window.switchTab=switchTab;
+window.initLogin=initLogin;
+window.initRegister=initRegister;
+window.openTargetModal=openTargetModal;
+window.closeTargetModal=closeTargetModal;
+window.acceptAlert=acceptAlert;
+
+document.addEventListener('DOMContentLoaded', async ()=>{
+  await new Promise(r=>setTimeout(r,1800));
+
+  // Firebase مُعدّ مسبقاً — تخطّي شاشة الإعداد دائماً
+  const sess=loadSess();
+  if(sess?.username){
+    try {
+      showLoading('جاري تسجيل الدخول...');
+      const user=await dbGet(`users/${sess.username}`);
+      if(user && user.passHash===sess.passHash){
+        try {
+          const av=await loadAvatar(sess.username);
+          user.avatar=av||user.avatar||'';
+        } catch{ user.avatar=user.avatar||''; }
+        try { await dbUpdate(`users/${sess.username}`,{online:true,lastSeen:Date.now()}); } catch{}
+        CU=user;
+        hideLoading();
+        initMain();
+      } else {
+        // If DEMO mode and no user found, restore from local session
+        if(DEMO && sess.username){
+          const localUser = _dg(`users/${sess.username}`);
+          if(localUser){
+            CU=localUser;
+            hideLoading();
+            initMain();
+            return;
+          }
+        }
+        clearSess();
+        hideLoading();
+        initLogin();
+      }
+    } catch(e){
+      hideLoading();
+      // Still try to show login even on error
+      initLogin();
+    }
+  } else {
+    initLogin();
+  }
+});
+
+// ══════════════════════════════════════════════════════════════
+// ██████████████████████████████████████████████████████████
+// ANDROID WEBVIEW BRIDGE — كل الكود أدناه مخصص لـ WebView
+// متوافق مع Kodular / AppBuilder
+// ██████████████████████████████████████████████████████████
+// ══════════════════════════════════════════════════════════════
+
+// ── 1. WakeLock Manager — منع إطفاء الشاشة ─────────────────
+let _wakeLock = null;
+
+async function _acquireWakeLock() {
+  if (!('wakeLock' in navigator)) return;
+  try {
+    _wakeLock = await navigator.wakeLock.request('screen');
+    _wakeLock.addEventListener('release', () => { _wakeLock = null; });
+  } catch(e) { console.warn('[RESCUE] WakeLock:', e.message); }
+}
+
+// إعادة اكتساب WakeLock عند العودة للصفحة
+document.addEventListener('visibilitychange', async () => {
+  if (document.visibilityState === 'visible' && _wakeLock === null) {
+    await _acquireWakeLock();
+  }
+});
+
+// ── 2. Android Interface Bridge ─────────────────────────────
+// يسمح لـ Kodular باستدعاء دوال JavaScript والعكس
+window.RescueAndroid = {
+
+  // يُستدعى من Kodular عند استلام FCM token
+  onFCMToken: function(token) {
+    if (!token || !CU) return;
+    _fcmToken = token;
+    dbUpdate(`users/${CU.username}`, { fcmToken: token, fcmUpdated: Date.now() })
+      .then(() => console.log('[RESCUE] Android FCM token saved:', token.substring(0,20)+'...'))
+      .catch(e => console.warn('[RESCUE] FCM token save error:', e));
+  },
+
+  // يُستدعى من Kodular عند استلام إشعار FCM في الخلفية
+  onFCMNotification: function(jsonStr) {
+    try {
+      const d = typeof jsonStr === 'string' ? JSON.parse(jsonStr) : jsonStr;
+      if (!d) return;
+      if (d.type === 'sos') {
+        // تشغيل الإنذار فوراً
+        _unlockAudio();
+        if (!_actx) _actx = new (window.AudioContext || window.webkitAudioContext)();
+        if (_actx.state === 'suspended') {
+          _actx.resume().then(() => startAlarmLoop());
+        } else {
+          startAlarmLoop();
+        }
+        // معالجة التنبيه
+        if (d.alertId && typeof _processIncomingAlert === 'function') {
+          setTimeout(() => _processIncomingAlert(d.alertId, d), 300);
+        }
+      } else if (d.type === 'chat' && d.from && typeof openChat === 'function') {
+        showToast(`💬 رسالة جديدة من ${d.fromName || d.from}`, 'success');
+      }
+    } catch(e) { console.warn('[RESCUE] onFCMNotification parse error:', e); }
+  },
+
+  // يُستدعى من Kodular عند الضغط على إشعار
+  onNotificationClick: function(jsonStr) {
+    try {
+      const d = typeof jsonStr === 'string' ? JSON.parse(jsonStr) : jsonStr;
+      window.focus();
+      if (d.type === 'sos') {
+        if (activeAlert) { _fillAlertCard(activeAlert); _showAlertScreen(activeAlert); startAlarmLoop(); }
+        else if (d.alertId) setTimeout(() => _processIncomingAlert(d.alertId, d), 400);
+      } else if (d.type === 'chat' && d.from && typeof openChat === 'function') {
+        openChat(d.from);
+      }
+    } catch(e) {}
+  },
+
+  // يُستدعى من Kodular لإيقاف الإنذار
+  stopAlarm: function() {
+    stopAlarmLoop();
+    if (navigator.vibrate) navigator.vibrate(0);
+    if (activeAlert) { _hideAlertScreen(); activeAlert = null; }
+  },
+
+  // إرجاع FCM token الحالي لـ Kodular
+  getFCMToken: function() { return _fcmToken || ''; },
+
+  // إرجاع اسم المستخدم الحالي
+  getCurrentUser: function() { return CU ? CU.username : ''; },
+
+  // فتح شاشة الطوارئ يدوياً من Kodular
+  showEmergencyScreen: function() {
+    if (activeAlert) { _fillAlertCard(activeAlert); _showAlertScreen(activeAlert); }
+  }
+};
+
+// ── 3. WebView Detection & Android-specific init ─────────────
+const _isWebView = (function() {
+  const ua = navigator.userAgent.toLowerCase();
+  return ua.includes('wv') ||
+         ua.includes('webview') ||
+         (ua.includes('android') && !ua.includes('chrome/') && !ua.includes('firefox/')) ||
+         typeof window.Android !== 'undefined' ||
+         typeof window.RescueBridge !== 'undefined';
+})();
+
+// إعلام Kodular أن الصفحة جاهزة
+function _notifyAndroidReady() {
+  try {
+    // محاولة استدعاء الـ interface الأصلي لـ Kodular
+    if (typeof window.Android !== 'undefined' && window.Android.onAppReady) {
+      window.Android.onAppReady(JSON.stringify({ status: 'ready', user: CU?.username || '' }));
+    }
+    if (typeof window.RescueBridge !== 'undefined' && window.RescueBridge.onAppReady) {
+      window.RescueBridge.onAppReady(JSON.stringify({ status: 'ready', user: CU?.username || '' }));
+    }
+  } catch(e) {}
+}
+
+// ── 4. Enhanced Geolocation → Firestore (تحت كل مستخدم) ─────
+// عند triggerSOS نضيف حفظ الموقع في avatars/{username}/emergency_calls
+const _origTriggerSOS = triggerSOS;
+
+async function _saveLocationToFirestore(loc) {
+  if (!CU || !loc || DEMO) return;
+  try {
+    const { collection, addDoc, serverTimestamp } = await import(
+      'https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js'
+    );
+    // حفظ داخل subcollection: avatars/{username}/emergency_calls
+    const colRef = collection(_fs, 'avatars', CU.username, 'emergency_calls');
+    await addDoc(colRef, {
+      lat:       loc.lat,
+      lng:       loc.lng,
+      accuracy:  loc.acc || null,
+      timestamp: Date.now(),
+      username:  CU.username,
+      name:      CU.name,
+      targets:   selectedTarget === 'all'
+        ? Object.keys(friends)
+        : [...selectedTargets]
+    });
+    console.log('[RESCUE] Location saved to Firestore ✅');
+  } catch(e) {
+    console.warn('[RESCUE] Firestore location save error:', e.message);
+  }
+}
+
+// ── 5. High-Accuracy Geolocation with Permission Handling ────
+async function _getHighAccuracyLocation() {
+  return new Promise((resolve) => {
+    if (!navigator.geolocation) { resolve(null); return; }
+
+    // أولاً: جرّب الدقة العالية
+    navigator.geolocation.getCurrentPosition(
+      pos => resolve({
+        lat: pos.coords.latitude,
+        lng: pos.coords.longitude,
+        acc: pos.coords.accuracy
+      }),
+      err => {
+        if (err.code === 1) {
+          // رُفض الإذن
+          showToast('⚠️ تم رفض إذن الموقع — الإنذار سيُرسل بدون إحداثيات', 'warning');
+          resolve(null);
+        } else {
+          // timeout أو غير متاح — جرّب بدقة منخفضة
+          navigator.geolocation.getCurrentPosition(
+            pos => resolve({
+              lat: pos.coords.latitude,
+              lng: pos.coords.longitude,
+              acc: pos.coords.accuracy
+            }),
+            () => resolve(null),
+            { timeout: 5000, maximumAge: 120000, enableHighAccuracy: false }
+          );
+        }
+      },
+      { timeout: 7000, maximumAge: 0, enableHighAccuracy: true }
+    );
+  });
+}
+
+// ── 6. Persistent Alarm — يعمل حتى مع إغلاق الشاشة ─────────
+// استخدام AudioContext مع نوع مميز يمنع Android من إيقافه
+let _alarmNodes = [];
+
+function _stopAllAlarmNodes() {
+  _alarmNodes.forEach(n => { try { n.stop(); } catch(e){} });
+  _alarmNodes = [];
+}
+
+// نسخة معززة من startAlarmLoop تضمن الاستمرارية في WebView
+const _origStartAlarmLoop = startAlarmLoop;
+window._webviewAlarmActive = false;
+
+function _startWebViewAlarm() {
+  window._webviewAlarmActive = true;
+  _acquireWakeLock();  // منع إطفاء الشاشة
+
+  // اهتزاز متكرر — Android WebView يدعمه
+  if (navigator.vibrate) {
+    const _vibLoop = setInterval(() => {
+      if (!window._webviewAlarmActive) { clearInterval(_vibLoop); return; }
+      navigator.vibrate([600, 250, 600, 250, 600]);
+    }, 2000);
+  }
+
+  // إشعار النظام من داخل SW (إذا كان مسجلاً)
+  if ('serviceWorker' in navigator && navigator.serviceWorker.controller) {
+    navigator.serviceWorker.controller.postMessage({
+      type:    'SHOW_LOCAL_NOTIF',
+      title:   '🚨 نداء طوارئ نشط!',
+      body:    'اضغط لفتح التطبيق والاستجابة',
+      tag:     'rescue-active-alarm',
+      persist: true
+    });
+  }
+}
+
+function _stopWebViewAlarm() {
+  window._webviewAlarmActive = false;
+  if (navigator.vibrate) navigator.vibrate(0);
+}
+
+// ── 7. Enhanced Permission Request ──────────────────────────
+async function _requestAndroidPermissions() {
+  const results = {};
+
+  // الإشعارات
+  if ('Notification' in window) {
+    try {
+      results.notifications = await Notification.requestPermission();
+    } catch(e) {
+      results.notifications = Notification.permission;
+    }
+  }
+
+  // الموقع
+  if ('permissions' in navigator) {
+    try {
+      const loc = await navigator.permissions.query({ name: 'geolocation' });
+      results.location = loc.state;
+      if (loc.state === 'prompt') {
+        // طلب إذن الموقع عبر getCurrentPosition
+        await new Promise(r => {
+          navigator.geolocation.getCurrentPosition(
+            () => { results.location = 'granted'; r(); },
+            () => { r(); },
+            { timeout: 5000 }
+          );
+        });
+      }
+    } catch(e) {}
+  }
+
+  // WakeLock
+  await _acquireWakeLock();
+
+  // إبلاغ Android بالنتيجة
+  try {
+    if (typeof window.Android !== 'undefined' && window.Android.onPermissionsResult) {
+      window.Android.onPermissionsResult(JSON.stringify(results));
+    }
+  } catch(e) {}
+
+  return results;
+}
+
+// ── 8. FCM Token Registration (Android + Browser) ────────────
+async function _registerFCMToken() {
+  if (!_msg || DEMO || !CU) return;
+
+  // تحقق من إذن الإشعارات أولاً
+  let perm = 'Notification' in window ? Notification.permission : 'denied';
+  if (perm === 'default') {
+    perm = await Notification.requestPermission().catch(() => 'denied');
+  }
+  if (perm !== 'granted') return;
+
+  try {
+    const swReg = 'serviceWorker' in navigator
+      ? await navigator.serviceWorker.ready
+      : null;
+
+    const tokenOptions = { vapidKey: _VAPID_KEY };
+    if (swReg) tokenOptions.serviceWorkerRegistration = swReg;
+
+    const token = await getToken(_msg, tokenOptions);
+    if (token && CU) {
+      _fcmToken = token;
+      await dbUpdate(`users/${CU.username}`, {
+        fcmToken:    token,
+        fcmUpdated:  Date.now(),
+        platform:    _isWebView ? 'android-webview' : 'web',
+        userAgent:   navigator.userAgent.substring(0, 100)
+      });
+      console.log('[RESCUE] FCM token registered ✅');
+
+      // إبلاغ Android بالـ token
+      if (typeof window.Android !== 'undefined' && window.Android.onFCMToken) {
+        window.Android.onFCMToken(token);
+      }
+    }
+  } catch(e) {
+    console.warn('[RESCUE] FCM registration error:', e.message);
+  }
+}
+
+// ── 9. Override triggerSOS to add Firestore location save ────
+window.triggerSOS = async function() {
+  showLoading('جاري تحديد موقعك...');
+
+  // استخدام دالة الدقة العالية
+  const loc = await _getHighAccuracyLocation();
+
+  showLoading('جاري إرسال نداء الطوارئ...');
+
+  try {
+    const ts = Date.now();
+    const baseAlert = {
+      from:       CU.username,
+      fromName:   CU.name,
+      fromAvatar: CU.avatar || '',
+      message:    `🚨 ${CU.name} يحتاج مساعدة عاجلة!`,
+      lat:        loc?.lat || null,
+      lng:        loc?.lng || null,
+      acc:        loc?.acc || null,
+      timestamp:  ts,
+      responded:  {}
+    };
+
+    // حفظ الموقع في Firestore تحت المستخدم
+    if (loc) _saveLocationToFirestore(loc);
+
+    if (selectedTarget === 'all') {
+      const alert = { ...baseAlert, targetType: 'all', targetUsername: '' };
+      if (DEMO) { _ds(`alerts/${ts}`, alert); }
+      else { const r = push(ref(_db, 'alerts')); await set(r, alert); }
+    } else if (selectedTarget === 'custom' && selectedTargets.size > 0) {
+      let i = 0;
+      for (const uname of selectedTargets) {
+        const alert = { ...baseAlert, targetType: 'user', targetUsername: uname, timestamp: ts + i };
+        if (DEMO) { _ds(`alerts/${ts + i}`, alert); }
+        else { const r = push(ref(_db, 'alerts')); await set(r, alert); }
+        i++;
+      }
+    } else {
+      const alert = { ...baseAlert, targetType: 'all', targetUsername: '' };
+      if (DEMO) { _ds(`alerts/${ts}`, alert); }
+      else { const r = push(ref(_db, 'alerts')); await set(r, alert); }
+    }
+
+    hideLoading();
+    playAlarm('send');
+    vib([200, 100, 200, 100, 500]);
+
+    const targetLabel = selectedTarget === 'all'
+      ? 'الجميع'
+      : selectedTarget === 'custom'
+      ? `${selectedTargets.size} أشخاص`
+      : '@' + selectedTarget;
+    const locLabel = loc ? ' 📍 مع الموقع' : ' ⚠️ بدون موقع';
+    showToast(`🚨 تم إرسال النداء إلى ${targetLabel}${locLabel}`, 'sos');
+
+    const btn = document.getElementById('sos-circle');
+    if (btn) { btn.classList.add('alert-active'); setTimeout(() => btn.classList.remove('alert-active'), 5000); }
+
+    // إرسال FCM Push
+    let pushTargets = [];
+    if (selectedTarget === 'all') pushTargets = Object.keys(friends);
+    else if (selectedTarget === 'custom') pushTargets = [...selectedTargets];
+    if (pushTargets.length > 0) _sendFCMToUsers(pushTargets, baseAlert).catch(() => {});
+
+  } catch(e) {
+    hideLoading();
+    showToast('فشل الإرسال: ' + e.message, 'error');
+  }
+};
+
+// ── 10. Enhanced showIncomingAlert for Android WebView ───────
+const _origShowIncomingAlert = showIncomingAlert;
+window.showIncomingAlert = function(alert) {
+  // استدعاء الأصلي
+  _origShowIncomingAlert(alert);
+
+  // تفعيل WebView alarm
+  _startWebViewAlarm();
+
+  // ملء الشاشة (Fullscreen API)
+  try {
+    const el = document.documentElement;
+    if (el.requestFullscreen) el.requestFullscreen().catch(() => {});
+    else if (el.webkitRequestFullscreen) el.webkitRequestFullscreen();
+  } catch(e) {}
+
+  // إبقاء الشاشة مضاءة
+  _acquireWakeLock();
+
+  // إبلاغ Android bridge
+  try {
+    if (typeof window.Android !== 'undefined' && window.Android.onEmergencyAlert) {
+      window.Android.onEmergencyAlert(JSON.stringify({
+        from:     alert.from,
+        fromName: alert.fromName,
+        message:  alert.message,
+        lat:      alert.lat || '',
+        lng:      alert.lng || '',
+        alertId:  alert.id
+      }));
+    }
+  } catch(e) {}
+};
+
+// ── 11. Override acceptAlert to stop WebView alarm ───────────
+const _origAcceptAlert = acceptAlert;
+window.acceptAlert = async function(alert) {
+  _stopWebViewAlarm();
+  await _origAcceptAlert(alert);
+  // إبلاغ Android
+  try {
+    if (typeof window.Android !== 'undefined' && window.Android.onAlertAccepted) {
+      window.Android.onAlertAccepted(JSON.stringify({ alertId: alert.id }));
+    }
+  } catch(e) {}
+};
+
+// ── 12. App Init for WebView ─────────────────────────────────
+document.addEventListener('DOMContentLoaded', () => {
+  // طلب جميع الصلاحيات فور تحميل الصفحة
+  _requestAndroidPermissions();
+
+  // اكتساب WakeLock مبكراً
+  _acquireWakeLock();
+
+  // تسجيل FCM بعد ثانيتين من تحميل المستخدم
+  const _waitForUser = setInterval(() => {
+    if (CU) {
+      clearInterval(_waitForUser);
+      setTimeout(() => _registerFCMToken(), 1500);
+      setTimeout(() => _notifyAndroidReady(), 500);
+    }
+  }, 500);
+}, { once: true });
+
+// ── 13. Handle page shown event (Android back/resume) ────────
+window.addEventListener('pageshow', async () => {
+  await _acquireWakeLock();
+  if (CU && _isWebView) {
+    setTimeout(() => _registerFCMToken(), 2000);
+  }
+});
+
+// ── 14. Expose functions to window for Android JavaScript Interface
+window.rescueStopAlarm      = () => { stopAlarmLoop(); _stopWebViewAlarm(); if(navigator.vibrate) navigator.vibrate(0); };
+window.rescueGetFCMToken    = () => _fcmToken || '';
+window.rescueGetCurrentUser = () => CU ? CU.username : '';
+window.rescueOnFCMToken     = (t) => window.RescueAndroid.onFCMToken(t);
+window.rescueOnNotification = (j) => window.RescueAndroid.onFCMNotification(j);
+window.rescueOnNotifClick   = (j) => window.RescueAndroid.onNotificationClick(j);
+window.rescueIsReady        = () => true;
+
+// FCM Auto-init — يعمل في الخلفية بصمت عند تسجيل الدخول
+async function _runFCMDiag() {
+  // تسجيل SW إذا لم يكن مسجلاً
+  if ('serviceWorker' in navigator) {
+    try {
+      const regs = await navigator.serviceWorker.getRegistrations();
+      if (regs.length === 0) {
+        await navigator.serviceWorker.register('/firebase-messaging-sw.js', { scope: '/' });
+      }
+    } catch(e) { console.warn('[RESCUE] SW:', e.message); }
+  }
+  // طلب إذن الإشعارات وجلب Token بصمت
+  if ('Notification' in window) {
+    let perm = Notification.permission;
+    if (perm === 'default') {
+      perm = await Notification.requestPermission().catch(() => 'denied');
+    }
+    if (perm === 'granted' && !_fcmToken) {
+      await _initFCM().catch(() => {});
+    }
+  }
+}
+window._runFCMDiag = _runFCMDiag;
+
+
+// ══════════════════════════════════════════════════════════════
+// FLOATING IN-APP NOTIFICATION SYSTEM (Facebook/WhatsApp style)
+// يعمل حتى بدون إذن إشعارات المتصفح
+// ══════════════════════════════════════════════════════════════
+
+const _floatContainer = (() => {
+  let c = document.getElementById('float-notif-container');
+  if (!c) {
+    c = document.createElement('div');
+    c.id = 'float-notif-container';
+    c.className = 'float-notif-container';
+    document.body.appendChild(c);
+  }
+  return c;
+})();
+
+let _floatQueue = [];
+let _floatActive = 0;
+const MAX_FLOAT = 3;
+const FLOAT_DURATION = 6000; // 6 seconds
+
+function showFloatNotif({ type='chat', title='', body='', avatar='', from='', onClick=null, persistent=false }) {
+  const id = 'fn_' + Date.now() + '_' + Math.random().toString(36).substr(2,5);
+  
+  const el = document.createElement('div');
+  el.className = `float-notif ${type}-type`;
+  el.id = id;
+  el.setAttribute('role', 'alert');
+  
+  const iconContent = avatar
+    ? ''
+    : (type === 'sos' ? '🚨' : '💬');
+  
+  const appLabel = type === 'sos' ? 'نداء طوارئ' : 'رسالة جديدة';
+  const now = new Date().toLocaleTimeString('ar', { hour:'2-digit', minute:'2-digit' });
+  
+  el.innerHTML = `
+    <div class="float-notif-icon" ${avatar ? `style="background-image:url(${avatar})"` : ''}>
+      ${iconContent}
+    </div>
+    <div class="float-notif-body">
+      <div class="float-notif-app">RESCUE · ${appLabel}</div>
+      <div class="float-notif-title">${title}</div>
+      <div class="float-notif-text">${body}</div>
+    </div>
+    <div class="float-notif-time">${now}</div>
+    <button class="float-notif-close" onclick="event.stopPropagation();removeFloatNotif('${id}')">✕</button>
+  `;
+  
+  // Click handler
+  el.addEventListener('click', () => {
+    if (onClick) onClick();
+    removeFloatNotif(id);
+  });
+  
+  // Swipe to dismiss
+  let startX = 0, startY = 0, moved = false;
+  el.addEventListener('touchstart', e => {
+    startX = e.touches[0].clientX;
+    startY = e.touches[0].clientY;
+    moved = false;
+  }, { passive: true });
+  el.addEventListener('touchmove', e => {
+    const dx = e.touches[0].clientX - startX;
+    const dy = e.touches[0].clientY - startY;
+    if (Math.abs(dy) > 10 && dy < 0) {
+      moved = true;
+      el.style.transform = `translateY(${dy}px)`;
+      el.style.opacity = Math.max(0, 1 - Math.abs(dy) / 100);
+    }
+  }, { passive: true });
+  el.addEventListener('touchend', () => {
+    if (moved && parseFloat(el.style.opacity) < 0.5) {
+      removeFloatNotif(id);
+    } else {
+      el.style.transform = '';
+      el.style.opacity = '';
+    }
+  });
+  
+  // Sound
+  if (type === 'chat') {
+    _playChatSound();
+  }
+  // SOS sound is handled separately by alarm system
+  
+  // Vibrate
+  if (navigator.vibrate) {
+    if (type === 'sos') {
+      navigator.vibrate([300, 100, 300, 100, 600]);
+    } else {
+      navigator.vibrate([80, 50, 80]);
+    }
+  }
+  
+  // Add to container
+  const container = document.getElementById('float-notif-container') || _floatContainer;
+  container.appendChild(el);
+  _floatActive++;
+  
+  // Remove excess
+  while (container.children.length > MAX_FLOAT) {
+    const oldest = container.firstElementChild;
+    if (oldest) removeFloatNotif(oldest.id);
+  }
+  
+  // Auto-dismiss (unless persistent)
+  if (!persistent) {
+    setTimeout(() => removeFloatNotif(id), FLOAT_DURATION);
+  }
+  
+  return id;
+}
+
+function removeFloatNotif(id) {
+  const el = document.getElementById(id);
+  if (!el || el.classList.contains('removing')) return;
+  el.classList.add('removing');
+  setTimeout(() => {
+    el.remove();
+    _floatActive = Math.max(0, _floatActive - 1);
+  }, 400);
+}
+
+// Chat notification sound (pleasant chime)
+function _playChatSound() {
+  try {
+    if (!_actx) _actx = new (window.AudioContext || window.webkitAudioContext)();
+    if (_actx.state === 'suspended') _actx.resume();
+    const ctx = _actx;
+    
+    // Pleasant two-tone chime (like Messenger)
+    const notes = [
+      { freq: 587.33, start: 0, dur: 0.12, vol: 0.25 },     // D5
+      { freq: 880,    start: 0.1, dur: 0.18, vol: 0.2 },     // A5
+      { freq: 1046.5, start: 0.22, dur: 0.25, vol: 0.15 },   // C6
+    ];
+    
+    notes.forEach(({ freq, start, dur, vol }) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.type = 'sine';
+      osc.frequency.value = freq;
+      gain.gain.setValueAtTime(0, ctx.currentTime + start);
+      gain.gain.linearRampToValueAtTime(vol, ctx.currentTime + start + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + start + dur);
+      osc.start(ctx.currentTime + start);
+      osc.stop(ctx.currentTime + start + dur + 0.05);
+    });
+  } catch(e) {}
+}
+
+// SOS notification sound (urgent)
+function _playSOSNotifSound() {
+  try {
+    if (!_actx) _actx = new (window.AudioContext || window.webkitAudioContext)();
+    if (_actx.state === 'suspended') _actx.resume();
+    const ctx = _actx;
+    
+    // Three urgent beeps
+    for (let i = 0; i < 3; i++) {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.type = 'square';
+      osc.frequency.value = i % 2 === 0 ? 880 : 1047;
+      const t = ctx.currentTime + i * 0.18;
+      gain.gain.setValueAtTime(0.3, t);
+      gain.gain.exponentialRampToValueAtTime(0.001, t + 0.12);
+      osc.start(t);
+      osc.stop(t + 0.15);
+    }
+  } catch(e) {}
+}
+
+window.showFloatNotif = showFloatNotif;
+window.removeFloatNotif = removeFloatNotif;
+
+// ══════════════════════════════════════════════════════════════
+// ENHANCED NOTIFICATION DISPATCH
+// يرسل إشعار عائم + إشعار النظام + يحدث الجرس
+// ══════════════════════════════════════════════════════════════
+
+function dispatchNotification({ type='chat', title='', body='', avatar='', from='', data={}, persistent=false }) {
+  // 1. إشعار عائم داخل التطبيق (يعمل دائماً)
+  showFloatNotif({
+    type, title, body, avatar, from, persistent,
+    onClick: () => {
+      if (type === 'chat' && from && typeof openChat === 'function') {
+        openChat(from);
+      } else if (type === 'sos') {
+        if (activeAlert) {
+          _fillAlertCard(activeAlert);
+          _showAlertScreen(activeAlert);
+          startAlarmLoop();
+        }
+      }
+    }
+  });
+  
+  // 2. إشعار النظام (إن كان مصرحاً)
+  if ('Notification' in window && Notification.permission === 'granted') {
+    _showDirectNotif(title, body, { ...data, type, from }, type === 'sos');
+  }
+  
+  // 3. تحديث الجرس
+  _updateBell();
+}
+
+window.dispatchNotification = dispatchNotification;
+
+</script>
+
+<style>
+:root{
+  --red:#ff2244;--red2:#ff6688;--green:#00ff88;--cyan:#00ffcc;
+  --bg:#060008;--card:rgba(255,255,255,0.04);--border:rgba(255,34,68,0.25);
+  --text:#fff;--t2:#888;
+}
+*{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
+html,body{width:100%;height:100%;background:var(--bg);color:var(--text);
+  font-family:'Cairo',sans-serif;overflow:hidden;position:fixed;top:0;left:0;}
+
+/* BG glow */
+body::before{content:'';position:fixed;inset:0;pointer-events:none;z-index:0;
+  background:
+    radial-gradient(ellipse 60% 50% at 20% 10%,rgba(255,34,68,.12) 0%,transparent 60%),
+    radial-gradient(ellipse 50% 60% at 80% 90%,rgba(0,255,136,.06) 0%,transparent 60%),
+    radial-gradient(ellipse 40% 40% at 60% 40%,rgba(100,0,255,.04) 0%,transparent 60%);
+  animation:bgP 8s ease-in-out infinite;}
+@keyframes bgP{0%,100%{opacity:1}50%{opacity:.7}}
+
+/* SCREENS */
+.screen{position:fixed;inset:0;display:none;flex-direction:column;align-items:center;justify-content:center;z-index:1;overflow-y:auto;}
+.screen.active{display:flex;}
+
+/* SPLASH */
+#screen-splash{gap:18px;}
+.spl-logo{font-size:86px;animation:sFloat 3s ease-in-out infinite;filter:drop-shadow(0 0 28px rgba(255,34,68,.8));}
+.spl-title{font-family:'Orbitron',monospace;font-size:36px;font-weight:900;color:var(--red);
+  text-shadow:0 0 28px var(--red),0 0 56px rgba(255,34,68,.4);letter-spacing:6px;}
+.spl-sub{color:var(--t2);font-size:14px;}
+.spl-dots{display:flex;gap:10px;margin-top:16px;}
+.spl-dot{width:10px;height:10px;border-radius:50%;background:var(--red);box-shadow:0 0 10px var(--red);animation:dp 1.2s ease-in-out infinite;}
+.spl-dot:nth-child(2){animation-delay:.2s}.spl-dot:nth-child(3){animation-delay:.4s}
+
+/* AUTH SCREENS */
+#screen-register,#screen-login{padding:20px;overflow-y:auto;justify-content:flex-start;padding-top:30px;}
+.auth-card{background:rgba(255,255,255,.03);border:1px solid var(--border);backdrop-filter:blur(28px);
+  -webkit-backdrop-filter:blur(28px);border-radius:24px;padding:28px 22px;
+  width:100%;max-width:400px;display:flex;flex-direction:column;align-items:center;gap:12px;
+  animation:slideUp .5s ease;}
+.auth-logo{font-family:'Orbitron',monospace;font-size:24px;font-weight:900;color:var(--red);
+  text-shadow:0 0 18px var(--red);letter-spacing:4px;margin-bottom:2px;}
+.auth-sub{color:var(--t2);font-size:13px;text-align:center;}
+.auth-switch{color:var(--t2);font-size:13px;text-align:center;margin-top:4px;}
+.auth-switch a{color:var(--cyan);cursor:pointer;text-decoration:underline;}
+
+/* Avatar picker */
+.av-pick{width:86px;height:86px;border-radius:50%;background:rgba(255,34,68,.08);
+  border:2px dashed rgba(255,34,68,.4);display:flex;align-items:center;justify-content:center;
+  cursor:pointer;position:relative;overflow:hidden;transition:all .3s;flex-shrink:0;}
+.av-pick:hover{border-color:var(--red);background:rgba(255,34,68,.15);}
+.av-pick img{width:100%;height:100%;object-fit:cover;position:absolute;border-radius:50%;}
+.av-pick-icon{font-size:30px;}
+
+/* Inputs */
+.ig{width:100%;position:relative;}
+.il{color:var(--t2);font-size:12px;margin-bottom:5px;display:block;}
+.inp{width:100%;padding:12px 15px;background:rgba(255,255,255,.05);
+  border:1px solid rgba(255,255,255,.1);border-radius:12px;color:#fff;
+  font-size:14px;font-family:'Cairo',sans-serif;outline:none;direction:rtl;
+  transition:border .2s,box-shadow .2s;}
+.inp:focus{border-color:rgba(255,34,68,.5);box-shadow:0 0 14px rgba(255,34,68,.15);}
+.uname-prev{position:absolute;left:14px;top:50%;transform:translateY(-50%);
+  color:rgba(255,34,68,.7);font-size:12px;font-weight:600;}
+
+/* Buttons */
+.btn-main{width:100%;padding:14px;background:linear-gradient(135deg,#ff2244,#cc0033);
+  border:none;border-radius:13px;color:#fff;font-size:15px;font-weight:700;
+  font-family:'Cairo',sans-serif;cursor:pointer;letter-spacing:1px;
+  box-shadow:0 0 22px rgba(255,34,68,.4),0 4px 14px rgba(0,0,0,.4);transition:all .2s;}
+.btn-main:hover{transform:translateY(-1px);box-shadow:0 0 32px rgba(255,34,68,.6);}
+.btn-sec{width:100%;padding:12px;background:rgba(255,34,68,.1);border:1px solid rgba(255,34,68,.3);
+  border-radius:13px;color:var(--red);font-size:14px;font-weight:700;
+  font-family:'Cairo',sans-serif;cursor:pointer;transition:all .2s;}
+.btn-sec:hover{background:rgba(255,34,68,.2);}
+
+/* MAIN */
+#screen-main{justify-content:flex-start;padding:0;}
+
+/* Topbar */
+.topbar{width:100%;padding:13px 16px;display:flex;align-items:center;justify-content:space-between;
+  background:rgba(0,0,0,.45);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);
+  border-bottom:1px solid rgba(255,34,68,.12);z-index:10;flex-shrink:0;}
+.tb-user{display:flex;align-items:center;gap:10px;cursor:pointer;}
+.tb-av{width:40px;height:40px;border-radius:50%;background:rgba(255,34,68,.15);
+  border:2px solid rgba(255,34,68,.5);display:flex;align-items:center;justify-content:center;
+  font-weight:700;font-size:15px;color:var(--red);background-size:cover;background-position:center;}
+.tb-info{line-height:1.2;}
+.tb-name{font-size:13px;font-weight:700;}
+.tb-uname{font-size:11px;color:var(--t2);}
+.tb-logo{font-family:'Orbitron',monospace;font-size:17px;font-weight:900;color:var(--red);
+  letter-spacing:3px;text-shadow:0 0 14px var(--red);}
+.conn-ind{font-size:11px;color:var(--t2);background:rgba(255,255,255,.05);padding:3px 8px;border-radius:20px;}
+
+/* Status bar */
+.status-bar{width:100%;padding:5px 16px;display:flex;align-items:center;gap:8px;flex-shrink:0;}
+.st-dot{width:7px;height:7px;border-radius:50%;background:var(--green);
+  box-shadow:0 0 8px var(--green);animation:dp 2s ease-in-out infinite;}
+.st-txt{font-size:12px;color:var(--green);}
+
+/* Tabs content */
+.tabs-content{flex:1;overflow:hidden;width:100%;}
+.tab-content{display:none;height:100%;overflow-y:auto;flex-direction:column;}
+.tab-content.active{display:flex;}
+
+/* HOME */
+#content-home{align-items:center;padding:10px 18px 18px;gap:10px;}
+.target-sec{width:100%;}
+.target-lbl{font-size:11px;color:var(--t2);text-align:center;margin-bottom:7px;}
+.target-selector{display:flex;gap:7px;overflow-x:auto;padding-bottom:3px;justify-content:center;flex-wrap:wrap;}
+.target-selector::-webkit-scrollbar{display:none;}
+.target-btn{padding:6px 12px;border-radius:20px;cursor:pointer;font-size:11px;font-weight:600;
+  font-family:'Cairo',sans-serif;display:flex;align-items:center;gap:5px;white-space:nowrap;
+  background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.1);color:var(--t2);transition:all .2s;
+  touch-action:manipulation;-webkit-tap-highlight-color:transparent;user-select:none;}
+.target-btn.active{background:rgba(255,34,68,.2);border-color:var(--red);color:var(--red);
+  box-shadow:0 0 10px rgba(255,34,68,.25);}
+.tgt-wrap{position:relative;width:20px;height:20px;}
+.tgt-av,.tgt-init{width:20px;height:20px;border-radius:50%;object-fit:cover;
+  display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;
+  background:rgba(255,34,68,.2);color:var(--red);}
+.odot{width:8px;height:8px;border-radius:50%;border:1.5px solid var(--bg);}
+.odot.on{background:var(--green);box-shadow:0 0 6px var(--green);}
+.odot.off{background:#555;}
+
+/* SOS */
+.sos-container{flex:1;display:flex;align-items:center;justify-content:center;position:relative;width:100%;min-height:240px;}
+.sos-rings{position:absolute;width:280px;height:280px;}
+.sos-ring{position:absolute;border-radius:50%;border:1.5px solid rgba(255,34,68,.15);animation:rExp 3s ease-out infinite;}
+.sos-ring:nth-child(1){inset:30px;animation-delay:0s}
+.sos-ring:nth-child(2){inset:10px;animation-delay:.6s}
+.sos-ring:nth-child(3){inset:-10px;animation-delay:1.2s}
+.sos-ring:nth-child(4){inset:-30px;animation-delay:1.8s}
+.prg-svg{position:absolute;width:228px;height:228px;transform:rotate(-90deg);pointer-events:none;z-index:2;}
+#prg-circle{stroke-dasharray:565.5;stroke-dashoffset:565.5;stroke-linecap:round;transition:stroke-dashoffset .03s linear,stroke .2s;}
+.sos-circle{width:168px;height:168px;border-radius:50%;position:relative;z-index:3;
+  background:radial-gradient(circle,rgba(255,34,68,.12) 0%,rgba(10,0,20,.8) 65%);
+  border:3px solid rgba(255,34,68,.45);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);
+  display:flex;flex-direction:column;align-items:center;justify-content:center;
+  cursor:pointer;user-select:none;
+  box-shadow:0 0 32px rgba(255,34,68,.25),0 0 65px rgba(255,34,68,.1),inset 0 0 28px rgba(255,34,68,.08);
+  animation:sFloat 4s ease-in-out infinite;transition:all .15s;}
+.sos-circle:hover{box-shadow:0 0 48px rgba(255,34,68,.4),0 0 96px rgba(255,34,68,.15),inset 0 0 38px rgba(255,34,68,.12);}
+.sos-circle.pressing{transform:scale(.95);box-shadow:0 0 65px rgba(255,34,68,.6),0 0 130px rgba(255,34,68,.25),inset 0 0 48px rgba(255,34,68,.2);}
+.sos-circle.alert-active{animation:sosA .4s ease-in-out infinite;border-color:var(--red);}
+.sos-icon{font-size:42px;line-height:1;}
+.sos-lbl{font-size:13px;font-weight:700;color:var(--red);text-shadow:0 0 10px var(--red);margin-top:5px;letter-spacing:1px;}
+.sos-hint{font-size:10px;color:rgba(255,34,68,.5);margin-top:2px;}
+.sos-hint-bar{background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.07);
+  border-radius:11px;padding:9px 14px;width:100%;text-align:center;font-size:12px;color:var(--t2);}
+
+/* Target count badge on button */
+.tgt-count{background:rgba(255,34,68,.3);color:var(--red);border-radius:10px;
+  padding:1px 6px;font-size:10px;font-weight:700;margin-right:2px;}
+.tgt-count-custom{background:rgba(255,150,0,.3);color:#ffaa00;}
+
+/* TARGET MODAL */
+.tmod-overlay{
+  position:fixed;inset:0;z-index:9990;
+  background:rgba(0,0,0,.88);
+  display:none;align-items:flex-end;justify-content:center;
+  -webkit-tap-highlight-color:transparent;
+}
+.tmod-overlay.show{
+  display:flex;
+}
+.tmod-card{
+  width:100%;max-width:480px;
+  background:linear-gradient(180deg,#0f0020 0%,#080012 100%);
+  border:1px solid rgba(255,34,68,.25);border-radius:24px 24px 0 0;
+  max-height:82vh;display:flex;flex-direction:column;
+  transform:translateY(100%);
+  transition:transform .22s cubic-bezier(.25,1,.4,1);
+  will-change:transform;
+  -webkit-overflow-scrolling:touch;
+}
+.tmod-overlay.show .tmod-card{transform:translateY(0);}
+.tmod-head{padding:18px 18px 12px;display:flex;align-items:center;justify-content:space-between;
+  border-bottom:1px solid rgba(255,255,255,.06);flex-shrink:0;}
+.tmod-title{font-size:16px;font-weight:700;}
+.tmod-subtitle{font-size:11px;color:var(--t2);margin-top:2px;}
+.tmod-close{background:rgba(255,255,255,.06);border:none;color:#aaa;
+  width:32px;height:32px;border-radius:8px;cursor:pointer;font-size:14px;}
+.tmod-body{overflow-y:auto;padding:10px 14px 24px;flex:1;}
+.tmod-row{display:flex;align-items:center;gap:12px;padding:12px 10px;border-radius:14px;
+  margin-bottom:6px;cursor:pointer;transition:all .18s;
+  border:1.5px solid rgba(255,255,255,.05);background:rgba(255,255,255,.02);}
+.tmod-row:hover{background:rgba(255,34,68,.06);border-color:rgba(255,34,68,.2);}
+.tmod-row.tmod-selected{background:rgba(255,34,68,.1);border-color:rgba(255,34,68,.4);}
+.tmod-av-wrap{position:relative;width:46px;height:46px;flex-shrink:0;}
+.tmod-av{width:46px;height:46px;border-radius:50%;background:rgba(255,34,68,.15);
+  border:2px solid rgba(255,34,68,.3);display:flex;align-items:center;justify-content:center;
+  font-size:18px;font-weight:700;color:var(--red);}
+.tmod-av-img{width:46px;height:46px;border-radius:50%;object-fit:cover;
+  border:2px solid rgba(255,34,68,.3);}
+.tmod-info{flex:1;min-width:0;}
+.tmod-name{font-weight:700;font-size:14px;}
+.tmod-sub{font-size:11px;color:var(--t2);margin-top:2px;}
+.tmod-check{width:22px;height:22px;border-radius:50%;
+  border:2px solid rgba(255,255,255,.2);flex-shrink:0;transition:all .2s;
+  display:flex;align-items:center;justify-content:center;}
+.tmod-check.checked{background:var(--red);border-color:var(--red);}
+.tmod-check.checked::after{content:'✓';color:#fff;font-size:12px;font-weight:900;}
+.tmod-confirm{width:calc(100% - 28px);margin:10px 14px 16px;padding:14px;
+  background:linear-gradient(135deg,#ff2244,#cc0033);border:none;border-radius:13px;
+  color:#fff;font-size:15px;font-weight:700;font-family:'Cairo',sans-serif;cursor:pointer;
+  box-shadow:0 0 20px rgba(255,34,68,.4);}
+
+/* تحذير داخل مودال الاختيار */
+.tmod-warning{
+  margin:0 14px;
+  padding:10px 14px;
+  background:rgba(255,165,0,.08);
+  border:1px solid rgba(255,165,0,.25);
+  border-radius:12px;
+  font-size:12px;
+  color:rgba(255,200,80,.9);
+  text-align:center;
+  line-height:1.6;
+  flex-shrink:0;
+}
+
+/* Alert countdown */
+.al-countdown{font-size:12px;font-weight:700;margin-top:6px;letter-spacing:.5px;}
+.al-coords{font-size:11px;color:var(--cyan);margin-top:4px;display:none;}
+
+/* Bottom nav */
+.bottom-nav{
+  width:100%;display:flex;align-items:flex-end;
+  background:rgba(6,0,12,.92);backdrop-filter:blur(28px);
+  -webkit-backdrop-filter:blur(28px);
+  border-top:1px solid rgba(255,34,68,.15);
+  flex-shrink:0;position:relative;
+  padding-bottom:env(safe-area-inset-bottom,0px);
+}
+.tab-btn{flex:1;padding:10px 0 13px;display:flex;flex-direction:column;align-items:center;gap:3px;
+  background:none;border:none;cursor:pointer;color:var(--t2);transition:all .2s;font-family:'Cairo',sans-serif;position:relative;}
+.tab-btn .ti{font-size:21px;}
+.tab-btn .tl{font-size:10px;}
+.tab-btn.active{color:var(--red);}
+.tab-btn.active .ti{filter:drop-shadow(0 0 7px var(--red));}
+.friends-badge{position:absolute;top:4px;right:calc(50% - 18px);background:var(--red);color:#fff;
+  width:17px;height:17px;border-radius:50%;font-size:9px;font-weight:700;display:flex;align-items:center;justify-content:center;}
+
+/* زر 911 في وسط الشريط */
+.nav-911-wrap{
+  flex:0 0 auto;width:72px;
+  display:flex;flex-direction:column;align-items:center;
+  position:relative;padding-bottom:13px;
+  margin-top:-22px; /* يعلو عن الشريط */
+}
+.nav-911-btn{
+  width:62px;height:62px;border-radius:50%;
+  background:linear-gradient(145deg,#ff0022,#cc0018);
+  border:3px solid rgba(255,60,80,.6);
+  box-shadow:
+    0 0 0 4px rgba(6,0,12,.92),
+    0 0 20px rgba(255,0,34,.6),
+    0 0 40px rgba(255,0,34,.25),
+    inset 0 1px 0 rgba(255,255,255,.2);
+  display:flex;flex-direction:column;align-items:center;justify-content:center;
+  cursor:pointer;
+  transition:transform .12s, box-shadow .12s;
+  position:relative;
+  animation:btn911Glow 2.5s ease-in-out infinite;
+}
+@keyframes btn911Glow{
+  0%,100%{box-shadow:0 0 0 4px rgba(6,0,12,.92),0 0 20px rgba(255,0,34,.6),0 0 40px rgba(255,0,34,.25),inset 0 1px 0 rgba(255,255,255,.2);}
+  50%{box-shadow:0 0 0 4px rgba(6,0,12,.92),0 0 30px rgba(255,0,34,.9),0 0 60px rgba(255,0,34,.45),inset 0 1px 0 rgba(255,255,255,.2);}
+}
+.nav-911-btn:active{transform:scale(.92);box-shadow:0 0 0 4px rgba(6,0,12,.92),0 0 10px rgba(255,0,34,.4),inset 0 1px 0 rgba(255,255,255,.15);}
+.nav-911-num{font-family:'Orbitron',monospace;font-size:16px;font-weight:900;color:#fff;
+  letter-spacing:1px;line-height:1;text-shadow:0 0 10px rgba(255,255,255,.5);}
+.nav-911-sub{font-size:7.5px;color:rgba(255,255,255,.7);margin-top:1px;font-weight:700;letter-spacing:.5px;}
+.nav-911-label{font-size:9px;color:rgba(255,60,60,.8);margin-top:4px;font-weight:700;letter-spacing:.5px;}
+
+/* FRIENDS TAB */
+#content-friends{padding:14px;gap:10px;}
+.add-bar{display:flex;gap:8px;width:100%;}
+.add-bar .inp{flex:1;margin-bottom:0;}
+.btn-add{padding:12px 15px;background:rgba(255,34,68,.15);border:1px solid rgba(255,34,68,.4);
+  border-radius:12px;color:var(--red);cursor:pointer;font-weight:700;font-family:'Cairo',sans-serif;font-size:13px;white-space:nowrap;}
+.friends-wrap{flex:1;overflow-y:auto;width:100%;}
+.friend-item{display:flex;align-items:center;gap:11px;padding:11px 0;border-bottom:1px solid rgba(255,255,255,.05);}
+.fav-wrap{position:relative;flex-shrink:0;width:46px;height:46px;}
+.fav-img{width:46px;height:46px;border-radius:50%;object-fit:cover;border:2px solid rgba(255,34,68,.3);}
+.fav-ph{width:46px;height:46px;border-radius:50%;background:rgba(255,34,68,.12);
+  border:2px solid rgba(255,34,68,.3);display:flex;align-items:center;justify-content:center;
+  font-size:17px;font-weight:700;color:var(--red);}
+.finfo{flex:1;min-width:0;}
+.fname{font-weight:700;font-size:14px;}
+.funm{font-size:11px;color:var(--t2);margin-top:2px;}
+.factions{display:flex;gap:7px;}
+.sos-to-btn{background:rgba(255,34,68,.15);border:1px solid rgba(255,34,68,.3);
+  border-radius:10px;width:36px;height:36px;cursor:pointer;font-size:15px;}
+.rm-btn{background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.1);
+  border-radius:10px;width:36px;height:36px;color:var(--t2);cursor:pointer;font-size:13px;}
+
+/* HISTORY */
+#content-history{padding:14px;}
+.history-item{display:flex;align-items:flex-start;gap:11px;padding:12px 10px;margin-bottom:7px;
+  border-radius:13px;background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.06);}
+.history-item.sent{border-color:rgba(255,34,68,.15);}
+.history-item.recv{border-color:rgba(0,255,136,.12);}
+.loc-link{color:var(--cyan);font-size:11px;margin-top:4px;display:inline-block;}
+
+/* PROFILE TAB */
+#content-profile{padding:18px;align-items:center;}
+.pf-card{width:100%;max-width:380px;background:rgba(255,255,255,.03);
+  border:1px solid var(--border);border-radius:20px;padding:22px;
+  display:flex;flex-direction:column;align-items:center;gap:8px;}
+.pf-av{width:88px;height:88px;border-radius:50%;background:rgba(255,34,68,.12);
+  border:3px solid rgba(255,34,68,.4);display:flex;align-items:center;justify-content:center;
+  font-size:32px;font-weight:700;color:var(--red);background-size:cover;background-position:center;}
+.pf-name{font-size:21px;font-weight:900;}
+.pf-uname{color:var(--red);font-size:13px;}
+.pf-joined{color:var(--t2);font-size:11px;}
+.pf-stats{display:flex;gap:14px;width:100%;margin-top:8px;}
+.stat-c{flex:1;background:rgba(255,34,68,.06);border:1px solid rgba(255,34,68,.15);
+  border-radius:11px;padding:12px 6px;text-align:center;}
+.stat-n{font-size:24px;font-weight:900;color:var(--red);}
+.stat-l{font-size:11px;color:var(--t2);margin-top:3px;}
+.btn-edit{width:100%;padding:13px;background:rgba(0,255,200,.08);border:1px solid rgba(0,255,200,.25);
+  border-radius:13px;color:var(--cyan);font-size:14px;font-weight:700;
+  font-family:'Cairo',sans-serif;cursor:pointer;margin-top:6px;}
+.btn-logout{width:100%;padding:12px;background:rgba(255,34,68,.1);border:1px solid rgba(255,34,68,.3);
+  border-radius:13px;color:var(--red);font-size:14px;font-weight:700;
+  font-family:'Cairo',sans-serif;cursor:pointer;margin-top:4px;}
+
+/* EDIT PROFILE MODAL */
+.modal-overlay{position:fixed;inset:0;z-index:200;background:rgba(0,0,0,.85);
+  backdrop-filter:blur(10px);display:none;align-items:flex-end;justify-content:center;}
+.modal-overlay.show{animation:fadeIn .2s ease;}
+.modal-card{width:100%;max-width:480px;background:linear-gradient(180deg,#0d0018 0%,#080012 100%);
+  border:1px solid rgba(255,34,68,.2);border-radius:24px 24px 0 0;
+  padding:24px 20px 32px;animation:slideIn .3s ease;max-height:90vh;overflow-y:auto;}
+.modal-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:18px;}
+.modal-title{font-size:17px;font-weight:700;}
+.modal-close{background:rgba(255,255,255,.06);border:none;color:#aaa;
+  width:32px;height:32px;border-radius:8px;cursor:pointer;font-size:15px;}
+.edit-av-row{display:flex;align-items:center;gap:14px;margin-bottom:14px;}
+.edit-av-disp{width:70px;height:70px;border-radius:50%;background:rgba(255,34,68,.12);
+  border:2px solid rgba(255,34,68,.35);display:flex;align-items:center;justify-content:center;
+  font-size:26px;font-weight:700;color:var(--red);background-size:cover;background-position:center;flex-shrink:0;}
+.btn-change-av{padding:9px 16px;background:rgba(255,34,68,.12);border:1px solid rgba(255,34,68,.3);
+  border-radius:10px;color:var(--red);cursor:pointer;font-size:13px;font-weight:600;
+  font-family:'Cairo',sans-serif;}
+
+/* INCOMING ALERT MODAL */
+.alert-modal{
+  position:fixed;inset:0;
+  z-index:999999 !important;
+  background:rgba(0,0,0,0);
+  display:none;align-items:center;justify-content:center;
+  flex-direction:column;padding:16px;
+  pointer-events:none;
+  -webkit-backface-visibility:hidden;
+  backface-visibility:hidden;
+}
+.alert-modal.show{
+  display:flex !important;
+  background:rgba(0,0,8,.97);
+  pointer-events:all;
+  animation:alFadeIn .2s ease forwards;
+  overflow:hidden;
+}
+.alert-modal.show::before{
+  content:'';position:absolute;inset:0;
+  background:radial-gradient(circle at 50% 30%, rgba(255,34,68,.12), transparent 70%);
+  animation:alertBgPulse 2s ease-in-out infinite;
+  pointer-events:none;z-index:0;
+}
+@keyframes alertBgPulse{0%,100%{opacity:.4;}50%{opacity:1;}}
+@keyframes alFadeIn{from{opacity:0}to{opacity:1}}
+.alert-modal.flash .alert-card{
+  animation:alCardIn .35s cubic-bezier(.175,.885,.32,1.4) forwards,
+            alPulse 0.4s ease 0.35s 2;
+}
+@keyframes alCardIn{
+  from{transform:scale(.7) translateY(40px);opacity:0}
+  to{transform:scale(1) translateY(0);opacity:1}
+}
+@keyframes alPulse{
+  0%,100%{box-shadow:0 0 60px rgba(255,34,68,.5),0 0 120px rgba(255,34,68,.25),inset 0 0 40px rgba(255,34,68,.05);}
+  50%{box-shadow:0 0 90px rgba(255,34,68,.9),0 0 180px rgba(255,34,68,.5),inset 0 0 60px rgba(255,34,68,.1);}
+}
+.alert-card{
+  background:linear-gradient(160deg,rgba(255,34,68,.16) 0%,rgba(10,0,20,.98) 60%);
+  border:2.5px solid var(--red);border-radius:28px;
+  padding:0 0 20px;width:100%;max-width:370px;text-align:center;
+  box-shadow:0 0 60px rgba(255,34,68,.5),0 0 120px rgba(255,34,68,.25),inset 0 0 40px rgba(255,34,68,.05);
+  overflow:hidden;
+  opacity:0;transform:scale(.7) translateY(40px);
+}
+.alert-modal.show .alert-card{
+  animation:alCardIn .38s cubic-bezier(.175,.885,.32,1.4) forwards;
+}
+
+/* شريط رنين عريض في الأعلى */
+.al-ring-bar{
+  width:100%;height:8px;
+  background:rgba(255,34,68,.12);
+  margin-bottom:0;overflow:hidden;
+}
+.al-ring-progress{
+  height:100%;
+  background:linear-gradient(90deg,#ff0022,#ff6688,#ff0022);
+  background-size:200% 100%;
+  animation:alBarShimmer 1.5s linear infinite;
+  transition:width .08s linear;
+}
+@keyframes alBarShimmer{0%{background-position:200% 0}100%{background-position:-200% 0}}
+
+/* Header الأحمر */
+.al-header{
+  background:linear-gradient(135deg,rgba(255,34,68,.25),rgba(180,0,40,.15));
+  border-bottom:1px solid rgba(255,34,68,.2);
+  padding:16px 20px 14px;
+  display:flex;align-items:center;gap:12px;
+  text-align:right;
+}
+.al-emoji{font-size:38px;line-height:1;animation:alBounce .5s ease infinite alternate;flex-shrink:0;}
+@keyframes alBounce{from{transform:scale(1)}to{transform:scale(1.15) rotate(-5deg)}}
+.al-header-text{flex:1;}
+.al-sos-label{font-size:11px;font-weight:700;color:rgba(255,100,120,.8);letter-spacing:2px;text-transform:uppercase;margin-bottom:2px;}
+
+/* Avatar + Info */
+.al-body{padding:16px 20px 4px;}
+.al-av-row{display:flex;align-items:center;gap:14px;margin-bottom:12px;}
+.al-av{
+  width:70px;height:70px;border-radius:50%;flex-shrink:0;
+  background:rgba(255,34,68,.15);
+  border:3px solid var(--red);
+  display:flex;align-items:center;justify-content:center;
+  font-size:26px;font-weight:700;color:var(--red);
+  background-size:cover;background-position:center;
+  box-shadow:0 0 18px rgba(255,34,68,.5);
+  animation:alAvatarPulse 1.5s ease infinite;
+}
+@keyframes alAvatarPulse{
+  0%,100%{box-shadow:0 0 18px rgba(255,34,68,.5);}
+  50%{box-shadow:0 0 32px rgba(255,34,68,.9),0 0 55px rgba(255,34,68,.35);}
+}
+.al-info{flex:1;text-align:right;}
+.al-name{font-size:21px;font-weight:900;letter-spacing:.3px;}
+.al-user{color:rgba(255,100,120,.75);font-size:12px;margin-top:1px;}
+.al-msg{
+  color:rgba(255,255,255,.9);font-size:14px;
+  line-height:1.7;text-align:center;
+  background:rgba(255,34,68,.07);border:1px solid rgba(255,34,68,.15);
+  border-radius:12px;padding:10px 14px;margin-bottom:8px;
+}
+.al-time{color:var(--t2);font-size:11px;margin-bottom:4px;text-align:center;}
+.al-countdown{
+  font-size:13px;font-weight:700;margin:4px 0 8px;
+  text-align:center;letter-spacing:.3px;
+}
+.al-coords{
+  font-size:11px;color:var(--cyan);margin:4px 0;
+  background:rgba(0,255,200,.06);border:1px solid rgba(0,255,200,.2);
+  border-radius:8px;padding:6px 10px;text-align:center;
+  display:none;
+}
+
+/* أزرار */
+.al-btns{padding:0 18px;}
+.al-respond{
+  width:100%;padding:17px;margin-top:6px;
+  background:linear-gradient(135deg,#00e060,#00aa44);
+  border:none;border-radius:15px;color:#fff;
+  font-size:17px;font-weight:900;
+  font-family:'Cairo',sans-serif;cursor:pointer;
+  box-shadow:0 4px 28px rgba(0,220,100,.5);
+  transition:transform .12s,box-shadow .12s;
+  letter-spacing:.5px;
+  display:flex;align-items:center;justify-content:center;gap:8px;
+}
+.al-respond:active{transform:scale(.97);box-shadow:0 2px 14px rgba(0,220,100,.3);}
+.al-loc-btn{
+  display:none;align-items:center;justify-content:center;gap:7px;
+  width:100%;padding:12px;margin-top:8px;
+  background:rgba(0,255,200,.09);border:1px solid rgba(0,255,200,.3);
+  border-radius:13px;color:var(--cyan);cursor:pointer;
+  font-size:13px;font-weight:700;font-family:'Cairo',sans-serif;
+  transition:background .15s;
+}
+.al-loc-btn:active{background:rgba(0,255,200,.18);}
+.al-dismiss{
+  width:100%;padding:12px;margin-top:8px;
+  background:rgba(255,255,255,.04);
+  border:1px solid rgba(255,255,255,.09);
+  border-radius:12px;color:rgba(255,255,255,.4);
+  font-size:12px;font-family:'Cairo',sans-serif;cursor:pointer;
+  transition:background .15s;
+}
+.al-dismiss:active{background:rgba(255,255,255,.08);}
+
+/* Loading */
+.loading-overlay{position:fixed;inset:0;z-index:500;background:rgba(0,0,0,.8);
+  backdrop-filter:blur(10px);display:none;flex-direction:column;align-items:center;justify-content:center;gap:14px;}
+.loading-spin{width:38px;height:38px;border-radius:50%;
+  border:3px solid rgba(255,34,68,.15);border-top-color:var(--red);animation:spin .8s linear infinite;}
+.loading-msg{color:var(--t2);font-size:14px;}
+
+/* Toast */
+.toast{position:fixed;top:76px;left:50%;transform:translateX(-50%) translateY(-18px);
+  padding:9px 20px;border-radius:11px;font-size:13px;font-weight:600;z-index:999;
+  opacity:0;transition:all .3s;white-space:nowrap;pointer-events:none;max-width:90vw;text-align:center;}
+.toast.show{opacity:1;transform:translateX(-50%) translateY(0);}
+.toast-success{background:rgba(0,255,136,.15);border:1px solid var(--green);color:var(--green);}
+.toast-error{background:rgba(255,34,68,.15);border:1px solid var(--red);color:var(--red2);}
+.toast-warning{background:rgba(255,165,0,.15);border:1px solid orange;color:orange;}
+.toast-sos{background:rgba(255,34,68,.25);border:1px solid var(--red);color:#fff;font-size:15px;}
+
+/* Empty */
+.empty-state{color:var(--t2);text-align:center;padding:36px 18px;line-height:2;font-size:13px;}
+
+/* FIREBASE SETUP SCREEN */
+#screen-setup{padding:16px;overflow-y:auto;justify-content:flex-start;padding-top:20px;gap:0;}
+.setup-card{
+  background:rgba(255,255,255,.03);border:1px solid var(--border);
+  backdrop-filter:blur(28px);-webkit-backdrop-filter:blur(28px);
+  border-radius:22px;padding:22px 18px;width:100%;max-width:460px;
+  display:flex;flex-direction:column;gap:12px;animation:slideUp .5s ease;
+}
+.setup-logo{font-family:'Orbitron',monospace;font-size:20px;font-weight:900;
+  color:var(--red);text-shadow:0 0 14px var(--red);letter-spacing:3px;text-align:center;}
+.setup-title{font-size:15px;font-weight:700;text-align:center;margin-top:2px;}
+.setup-desc{
+  font-size:12px;color:var(--t2);text-align:center;line-height:1.7;
+  background:rgba(255,255,255,.03);border-radius:10px;padding:10px 12px;
+}
+.setup-steps{
+  background:rgba(0,255,200,.04);border:1px solid rgba(0,255,200,.15);
+  border-radius:12px;padding:12px 14px;font-size:12px;line-height:2;color:rgba(255,255,255,.75);
+}
+.setup-steps b{color:var(--cyan);}
+.setup-divider{border:none;border-top:1px solid rgba(255,255,255,.07);margin:4px 0;}
+.setup-field-label{font-size:12px;color:var(--t2);margin-bottom:4px;display:block;}
+.setup-field-req{color:var(--red);font-size:10px;margin-right:4px;}
+.setup-rules{
+  background:rgba(255,34,68,.06);border:1px solid rgba(255,34,68,.2);
+  border-radius:10px;padding:10px 14px;font-size:11px;color:rgba(255,150,150,.9);
+  line-height:1.9;font-family:monospace;direction:ltr;
+}
+.setup-reset{
+  background:none;border:none;color:rgba(255,255,255,.3);
+  font-size:11px;cursor:pointer;font-family:'Cairo',sans-serif;
+  text-decoration:underline;text-align:center;padding:4px;
+}
+.loading-spin-sm{width:30px;height:30px;border-radius:50%;
+  border:2px solid rgba(255,34,68,.15);border-top-color:var(--red);
+  animation:spin .8s linear infinite;margin:30px auto;}
+
+/* Scrollbar */
+::-webkit-scrollbar{width:3px;}
+::-webkit-scrollbar-track{background:transparent;}
+::-webkit-scrollbar-thumb{background:rgba(255,34,68,.3);border-radius:2px;}
+
+/* ══════════════════════════════════════════
+   NOTIFICATION BELL & PANEL
+══════════════════════════════════════════ */
+.notif-bell-btn{
+  position:relative;
+  background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.1);
+  border-radius:10px;width:36px;height:36px;cursor:pointer;
+  display:flex;align-items:center;justify-content:center;
+  font-size:17px;transition:all .2s;flex-shrink:0;
+}
+.notif-bell-btn:active{background:rgba(255,34,68,.2);}
+.notif-bell-btn.has-new{
+  border-color:rgba(255,34,68,.5);
+  animation:bellShake 2.5s ease-in-out infinite;
+}
+@keyframes bellShake{
+  0%,90%,100%{transform:rotate(0)}
+  92%{transform:rotate(-12deg)}
+  94%{transform:rotate(12deg)}
+  96%{transform:rotate(-8deg)}
+  98%{transform:rotate(8deg)}
+}
+.notif-count-badge{
+  position:absolute;top:-5px;right:-5px;
+  background:var(--red);color:#fff;border-radius:50%;
+  min-width:16px;height:16px;font-size:9px;font-weight:900;
+  display:none;align-items:center;justify-content:center;
+  border:1.5px solid var(--bg);padding:0 2px;
+}
+.notif-count-badge.show{display:flex;}
+
+/* Notification panel overlay */
+.notif-panel-overlay{
+  position:fixed;inset:0;z-index:4000;
+  background:rgba(0,0,0,.85);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);
+  display:none;align-items:flex-start;justify-content:flex-end;
+}
+.notif-panel-overlay.show{display:flex;animation:fadeIn .2s ease;}
+.notif-panel{
+  width:min(340px,100vw);height:100vh;
+  background:linear-gradient(180deg,#0e001e 0%,#080012 100%);
+  border-left:1px solid rgba(255,34,68,.2);
+  display:flex;flex-direction:column;
+  animation:slideFromRight .28s cubic-bezier(.25,1,.4,1);
+  overflow:hidden;
+}
+@keyframes slideFromRight{from{transform:translateX(100%)}to{transform:translateX(0)}}
+.notif-panel-head{
+  padding:18px 16px 14px;flex-shrink:0;
+  background:linear-gradient(135deg,rgba(255,34,68,.1),transparent);
+  border-bottom:1px solid rgba(255,34,68,.12);
+  display:flex;align-items:center;gap:10px;
+}
+.notif-panel-title{font-size:16px;font-weight:900;flex:1;}
+.notif-panel-clear{
+  background:rgba(255,34,68,.1);border:1px solid rgba(255,34,68,.25);
+  border-radius:8px;padding:5px 10px;color:var(--red);
+  font-size:11px;font-weight:700;cursor:pointer;font-family:'Cairo',sans-serif;
+}
+.notif-panel-close{
+  background:rgba(255,255,255,.06);border:none;color:#aaa;
+  width:30px;height:30px;border-radius:8px;cursor:pointer;font-size:14px;
+}
+.notif-tabs{display:flex;border-bottom:1px solid rgba(255,255,255,.06);flex-shrink:0;}
+.notif-tab{
+  flex:1;padding:10px;background:none;border:none;
+  color:var(--t2);font-size:12px;font-weight:700;
+  font-family:'Cairo',sans-serif;cursor:pointer;
+  border-bottom:2px solid transparent;transition:all .2s;
+  display:flex;align-items:center;justify-content:center;gap:5px;
+}
+.notif-tab.active{color:var(--red);border-bottom-color:var(--red);}
+.notif-tab-badge{
+  background:var(--red);color:#fff;border-radius:50%;
+  min-width:16px;height:16px;font-size:9px;
+  display:flex;align-items:center;justify-content:center;padding:0 2px;
+}
+.notif-list{flex:1;overflow-y:auto;padding:8px 0;}
+.notif-list::-webkit-scrollbar{width:2px;}
+.notif-list::-webkit-scrollbar-thumb{background:rgba(255,34,68,.2);}
+.notif-item{
+  display:flex;align-items:flex-start;gap:10px;
+  padding:11px 16px;border-bottom:1px solid rgba(255,255,255,.04);
+  cursor:pointer;transition:background .15s;position:relative;
+}
+.notif-item:hover{background:rgba(255,255,255,.03);}
+.notif-item.unread{background:rgba(255,34,68,.04);}
+.notif-item.unread::before{
+  content:'';position:absolute;right:0;top:0;bottom:0;width:3px;
+  background:var(--red);border-radius:0 2px 2px 0;
+}
+.notif-item-ico{
+  width:38px;height:38px;border-radius:50%;flex-shrink:0;
+  display:flex;align-items:center;justify-content:center;
+  font-size:17px;background:rgba(255,34,68,.12);border:1.5px solid rgba(255,34,68,.25);
+}
+.notif-item-ico.chat-ico{background:rgba(0,180,255,.1);border-color:rgba(0,180,255,.25);}
+.notif-item-body{flex:1;min-width:0;}
+.notif-item-title{font-size:13px;font-weight:700;margin-bottom:2px;}
+.notif-item-text{font-size:11px;color:var(--t2);overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;}
+.notif-item-time{font-size:10px;color:rgba(255,255,255,.25);margin-top:3px;}
+.notif-item-del{
+  background:none;border:none;color:rgba(255,255,255,.2);
+  font-size:14px;cursor:pointer;padding:2px 4px;flex-shrink:0;align-self:center;
+}
+.notif-item-del:hover{color:var(--red);}
+.notif-empty{
+  display:flex;flex-direction:column;align-items:center;
+  justify-content:center;gap:8px;height:200px;
+  color:var(--t2);font-size:13px;text-align:center;padding:20px;
+}
+
+/* ══════════════════════════════════════════
+   CHAT SCREEN
+══════════════════════════════════════════ */
+#screen-chat{
+  position:fixed;inset:0;z-index:5000;
+  display:none;flex-direction:column;
+  background:linear-gradient(180deg,#0a0015 0%,#060008 100%);
+}
+#screen-chat.chat-open{display:flex;}
+
+.chat-topbar{
+  width:100%;padding:0 14px;height:64px;flex-shrink:0;
+  display:flex;align-items:center;gap:10px;
+  background:rgba(0,0,0,.65);backdrop-filter:blur(22px);-webkit-backdrop-filter:blur(22px);
+  border-bottom:1px solid rgba(255,34,68,.2);z-index:2;
+}
+.chat-back{
+  background:rgba(255,34,68,.1);border:1px solid rgba(255,34,68,.3);
+  border-radius:10px;width:38px;height:38px;cursor:pointer;
+  font-size:18px;color:var(--red);flex-shrink:0;
+  display:flex;align-items:center;justify-content:center;
+}
+.chat-friend-av{
+  width:42px;height:42px;border-radius:50%;flex-shrink:0;
+  background:rgba(255,34,68,.15);border:2px solid rgba(255,34,68,.5);
+  display:flex;align-items:center;justify-content:center;
+  font-size:16px;font-weight:700;color:var(--red);
+  background-size:cover;background-position:center;
+}
+.chat-friend-info{flex:1;min-width:0;}
+.chat-friend-name{font-size:15px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.chat-friend-status{font-size:11px;color:var(--t2);margin-top:2px;}
+.chat-settings-btn{
+  background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.1);
+  border-radius:10px;width:38px;height:38px;cursor:pointer;
+  font-size:17px;color:#ccc;flex-shrink:0;
+  display:flex;align-items:center;justify-content:center;
+}
+
+/* bg particles */
+.chat-bg{position:absolute;inset:0;overflow:hidden;pointer-events:none;z-index:0;}
+.chat-particle{position:absolute;border-radius:50%;background:rgba(255,34,68,.05);
+  animation:chatPFloat 9s ease-in-out infinite;}
+@keyframes chatPFloat{
+  0%,100%{transform:translateY(0) scale(1);opacity:.5}
+  50%{transform:translateY(-50px) scale(1.3);opacity:.1}
+}
+
+/* Messages area */
+.chat-msgs-wrap{flex:1;overflow-y:auto;padding:14px 14px 6px;
+  display:flex;flex-direction:column;gap:6px;position:relative;z-index:1;}
+.chat-msgs-wrap::-webkit-scrollbar{width:2px;}
+.chat-msgs-wrap::-webkit-scrollbar-thumb{background:rgba(255,34,68,.2);}
+
+/* Date separator */
+.chat-date-sep{text-align:center;margin:8px 0 2px;}
+.chat-date-sep span{
+  background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.08);
+  border-radius:20px;padding:3px 13px;font-size:10px;color:var(--t2);}
+
+/* Message row */
+.msg-row{display:flex;align-items:flex-end;gap:7px;
+  max-width:82%;animation:msgAppear .22s ease;}
+@keyframes msgAppear{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}
+.msg-row.sent{align-self:flex-end;flex-direction:row-reverse;}
+.msg-row.recv{align-self:flex-start;}
+.msg-mini-av{
+  width:26px;height:26px;border-radius:50%;flex-shrink:0;
+  background:rgba(255,34,68,.15);border:1.5px solid rgba(255,34,68,.3);
+  display:flex;align-items:center;justify-content:center;
+  font-size:10px;font-weight:700;color:var(--red);
+  background-size:cover;background-position:center;
+}
+.msg-content{display:flex;flex-direction:column;}
+.msg-bubble{
+  padding:9px 13px;border-radius:18px;
+  font-size:13.5px;line-height:1.55;word-break:break-word;
+}
+.msg-row.sent .msg-bubble{
+  background:linear-gradient(135deg,rgba(255,34,68,.32),rgba(160,0,36,.38));
+  border:1px solid rgba(255,34,68,.38);border-bottom-right-radius:4px;color:#fff;
+}
+.msg-row.recv .msg-bubble{
+  background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.1);
+  border-bottom-left-radius:4px;color:#f0f0f0;
+}
+.msg-bubble.msg-sos{
+  background:linear-gradient(135deg,rgba(255,34,68,.45),rgba(200,0,30,.55));
+  border:1.5px solid var(--red);box-shadow:0 0 14px rgba(255,34,68,.25);
+}
+.msg-sos-icon{font-size:20px;display:block;margin-bottom:4px;}
+.msg-meta{font-size:9px;color:rgba(255,255,255,.3);margin-top:3px;
+  display:flex;align-items:center;gap:3px;}
+.msg-row.sent .msg-meta{justify-content:flex-end;}
+.msg-tick{font-size:10px;}
+.msg-tick.seen{color:var(--cyan);}
+
+/* Empty chat */
+.chat-empty-state{
+  flex:1;display:flex;flex-direction:column;align-items:center;
+  justify-content:center;gap:10px;color:var(--t2);
+  text-align:center;padding:24px;position:relative;z-index:1;
+}
+.chat-empty-icon{font-size:54px;opacity:.35;animation:sFloat 4s ease-in-out infinite;}
+
+/* Chat input */
+.chat-input-bar{
+  display:flex;align-items:center;gap:8px;
+  padding:10px 12px;
+  padding-bottom:max(10px,env(safe-area-inset-bottom,10px));
+  background:rgba(0,0,0,.6);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);
+  border-top:1px solid rgba(255,34,68,.12);
+  position:relative;z-index:2;flex-shrink:0;
+}
+.chat-inp{
+  flex:1;padding:11px 16px;
+  background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.12);
+  border-radius:24px;color:#fff;font-size:14px;font-family:'Cairo',sans-serif;
+  outline:none;direction:rtl;transition:border .2s,box-shadow .2s;
+}
+.chat-inp:focus{border-color:rgba(255,34,68,.4);box-shadow:0 0 12px rgba(255,34,68,.1);}
+.chat-inp::placeholder{color:rgba(255,255,255,.28);}
+.chat-send-btn{
+  width:44px;height:44px;border-radius:50%;flex-shrink:0;
+  background:linear-gradient(135deg,#ff2244,#cc0033);border:none;
+  cursor:pointer;font-size:18px;
+  box-shadow:0 0 16px rgba(255,34,68,.38);
+  display:flex;align-items:center;justify-content:center;
+  transition:transform .12s,box-shadow .12s;
+}
+.chat-send-btn:active{transform:scale(.91);}
+.chat-sos-mini-btn{
+  width:44px;height:44px;border-radius:50%;flex-shrink:0;
+  background:rgba(255,34,68,.1);border:1.5px solid rgba(255,34,68,.38);
+  cursor:pointer;font-size:17px;color:var(--red);
+  display:flex;align-items:center;justify-content:center;
+  transition:all .15s;
+}
+.chat-sos-mini-btn:active{background:rgba(255,34,68,.22);}
+
+/* Unread badge on chat btn */
+.chat-unread{
+  position:absolute;top:-4px;left:-4px;
+  background:var(--red);color:#fff;border-radius:50%;
+  width:17px;height:17px;font-size:9px;font-weight:700;
+  display:flex;align-items:center;justify-content:center;
+  border:1.5px solid var(--bg);
+}
+
+/* Chat button on friend item */
+.chat-open-btn{
+  background:rgba(0,180,255,.1);border:1px solid rgba(0,180,255,.3);
+  border-radius:10px;width:36px;height:36px;cursor:pointer;font-size:15px;
+  color:#00ccff;display:flex;align-items:center;justify-content:center;
+  transition:all .15s;position:relative;
+}
+.chat-open-btn:active{background:rgba(0,180,255,.22);}
+
+/* Friend search bar */
+.friend-search-wrap{width:100%;position:relative;}
+.friend-search-inp{
+  width:100%;padding:10px 14px 10px 38px;
+  background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.1);
+  border-radius:12px;color:#fff;font-size:13px;
+  font-family:'Cairo',sans-serif;outline:none;direction:rtl;
+  transition:border .2s;
+}
+.friend-search-inp:focus{border-color:rgba(255,34,68,.4);}
+.friend-search-inp::placeholder{color:rgba(255,255,255,.3);}
+.friend-search-icon{
+  position:absolute;left:12px;top:50%;transform:translateY(-50%);
+  font-size:15px;pointer-events:none;opacity:.5;
+}
+.friend-search-clear{
+  position:absolute;right:12px;top:50%;transform:translateY(-50%);
+  background:none;border:none;color:var(--t2);cursor:pointer;
+  font-size:14px;display:none;padding:2px 6px;
+}
+
+/* ══════════════════════════════════════════
+   CHAT SETTINGS MODAL
+══════════════════════════════════════════ */
+.cs-overlay{
+  position:fixed;inset:0;z-index:6000;
+  background:rgba(0,0,0,.88);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);
+  display:none;align-items:flex-end;justify-content:center;
+}
+.cs-overlay.show{display:flex;animation:fadeIn .2s ease;}
+.cs-sheet{
+  width:100%;max-width:480px;
+  background:linear-gradient(180deg,#0f0022 0%,#080012 100%);
+  border:1px solid rgba(255,34,68,.22);
+  border-radius:26px 26px 0 0;
+  max-height:90vh;overflow-y:auto;
+  animation:slideIn .28s cubic-bezier(.25,1,.4,1);
+}
+.cs-head{
+  padding:20px 20px 16px;
+  background:linear-gradient(135deg,rgba(255,34,68,.14),rgba(0,0,0,0));
+  border-bottom:1px solid rgba(255,34,68,.12);
+  display:flex;align-items:center;gap:14px;
+}
+.cs-friend-av{
+  width:58px;height:58px;border-radius:50%;flex-shrink:0;
+  background:rgba(255,34,68,.15);border:2.5px solid rgba(255,34,68,.4);
+  display:flex;align-items:center;justify-content:center;
+  font-size:22px;font-weight:700;color:var(--red);
+  background-size:cover;background-position:center;
+  box-shadow:0 0 18px rgba(255,34,68,.28);
+}
+.cs-friend-info{flex:1;}
+.cs-friend-name{font-size:17px;font-weight:900;}
+.cs-friend-uname{color:var(--red);font-size:12px;margin-top:2px;}
+.cs-friend-status{font-size:11px;color:var(--t2);margin-top:3px;}
+.cs-close-btn{
+  background:rgba(255,255,255,.07);border:none;color:#aaa;
+  width:32px;height:32px;border-radius:8px;cursor:pointer;font-size:14px;flex-shrink:0;
+}
+.cs-stats-grid{
+  display:grid;grid-template-columns:1fr 1fr;gap:8px;
+  padding:14px 18px;
+}
+.cs-stat{
+  background:rgba(255,34,68,.06);border:1px solid rgba(255,34,68,.12);
+  border-radius:12px;padding:12px;text-align:center;
+}
+.cs-stat-n{font-size:22px;font-weight:900;color:var(--red);}
+.cs-stat-l{font-size:10px;color:var(--t2);margin-top:3px;}
+.cs-section{padding:8px 18px 4px;}
+.cs-section-label{
+  font-size:10px;color:rgba(255,34,68,.7);font-weight:700;
+  letter-spacing:1.5px;text-transform:uppercase;margin-bottom:8px;
+}
+.cs-row{
+  display:flex;align-items:center;gap:12px;
+  padding:12px 14px;margin-bottom:6px;
+  background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.06);
+  border-radius:13px;
+}
+.cs-row-ico{
+  font-size:19px;width:36px;height:36px;flex-shrink:0;
+  display:flex;align-items:center;justify-content:center;
+  background:rgba(255,255,255,.05);border-radius:9px;
+}
+.cs-row-txt{flex:1;}
+.cs-row-title{font-size:13px;font-weight:700;}
+.cs-row-sub{font-size:11px;color:var(--t2);margin-top:2px;}
+.cs-row-right{font-size:12px;color:var(--t2);}
+.cs-toggle{
+  position:relative;width:44px;height:24px;
+  background:rgba(255,255,255,.12);border-radius:12px;
+  cursor:pointer;border:none;transition:background .25s;flex-shrink:0;
+}
+.cs-toggle.on{background:rgba(255,34,68,.55);}
+.cs-toggle::after{
+  content:'';position:absolute;top:2px;right:2px;
+  width:20px;height:20px;border-radius:50%;
+  background:#fff;transition:right .25s;box-shadow:0 1px 5px rgba(0,0,0,.4);
+}
+.cs-toggle.on::after{right:calc(100% - 22px);}
+.cs-danger-zone{padding:6px 18px 20px;}
+.cs-danger-label{
+  font-size:10px;color:rgba(255,100,80,.7);font-weight:700;
+  letter-spacing:1.5px;text-transform:uppercase;margin-bottom:8px;
+}
+.cs-danger-btn{
+  width:100%;padding:13px;
+  background:rgba(255,34,68,.08);border:1px solid rgba(255,34,68,.22);
+  border-radius:13px;color:var(--red);font-size:13px;font-weight:700;
+  font-family:'Cairo',sans-serif;cursor:pointer;margin-bottom:8px;transition:all .2s;
+}
+.cs-danger-btn:hover{background:rgba(255,34,68,.16);}
+.cs-danger-btn.cs-block{color:#ff7070;border-color:rgba(255,80,80,.25);}
+
+/* Animations */
+@keyframes fadeIn{from{opacity:0}to{opacity:1}}
+@keyframes slideUp{from{transform:translateY(28px);opacity:0}to{transform:translateY(0);opacity:1}}
+@keyframes slideIn{from{transform:translateY(100%)}to{transform:translateY(0)}}
+@keyframes spin{to{transform:rotate(360deg)}}
+@keyframes dp{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.4;transform:scale(.7)}}
+@keyframes sFloat{0%,100%{transform:translateY(0) rotate(0deg)}25%{transform:translateY(-12px) rotate(1deg)}75%{transform:translateY(-8px) rotate(-1deg)}}
+@keyframes rExp{0%{opacity:.4;transform:scale(.95)}50%{opacity:.1}100%{opacity:0;transform:scale(1.15)}}
+@keyframes sosA{0%,100%{box-shadow:0 0 38px rgba(255,34,68,.6),0 0 75px rgba(255,34,68,.3),inset 0 0 28px rgba(255,34,68,.2)}50%{box-shadow:0 0 75px rgba(255,34,68,.9),0 0 150px rgba(255,34,68,.5),inset 0 0 55px rgba(255,34,68,.4)}}
+@keyframes alFlash{0%,100%{background:rgba(0,0,0,.95)}50%{background:rgba(255,0,30,.12)}}
+@keyframes alPulse{from{box-shadow:0 0 38px rgba(255,34,68,.3),0 0 75px rgba(255,34,68,.1)}to{box-shadow:0 0 65px rgba(255,34,68,.6),0 0 130px rgba(255,34,68,.2)}}
+@keyframes bounce{from{transform:translateY(0)}to{transform:translateY(-7px)}}
+
+/* ══════════════════════════════════════════
+   FLOATING NOTIFICATION BANNER (WhatsApp-style)
+══════════════════════════════════════════ */
+.float-notif-container{
+  position:fixed;top:0;left:0;right:0;z-index:99990;
+  display:flex;flex-direction:column;gap:8px;
+  padding:env(safe-area-inset-top,10px) 10px 0;
+  pointer-events:none;
+}
+.float-notif{
+  pointer-events:auto;
+  width:100%;max-width:480px;margin:0 auto;
+  background:linear-gradient(135deg,rgba(14,0,28,.97),rgba(20,0,40,.97));
+  border:1.5px solid rgba(255,34,68,.35);
+  border-radius:18px;
+  padding:14px 16px;
+  display:flex;align-items:center;gap:13px;
+  backdrop-filter:blur(30px);-webkit-backdrop-filter:blur(30px);
+  box-shadow:
+    0 8px 32px rgba(0,0,0,.7),
+    0 0 0 1px rgba(255,255,255,.05),
+    0 0 25px rgba(255,34,68,.15);
+  cursor:pointer;
+  transform:translateY(-120%);
+  animation:floatNotifIn .45s cubic-bezier(.34,1.56,.64,1) forwards;
+  transition:transform .35s cubic-bezier(.4,0,.2,1), opacity .35s ease;
+  user-select:none;
+  -webkit-user-select:none;
+}
+.float-notif.removing{
+  animation:floatNotifOut .35s ease forwards;
+}
+.float-notif.chat-type{
+  border-color:rgba(0,180,255,.4);
+  box-shadow:0 8px 32px rgba(0,0,0,.7),0 0 25px rgba(0,180,255,.12);
+}
+.float-notif.sos-type{
+  border-color:rgba(255,34,68,.6);
+  box-shadow:0 8px 32px rgba(0,0,0,.7),0 0 30px rgba(255,34,68,.25);
+  animation:floatNotifIn .45s cubic-bezier(.34,1.56,.64,1) forwards, sosNotifPulse 1.5s ease-in-out 0.5s infinite;
+}
+@keyframes floatNotifIn{
+  0%{transform:translateY(-120%);opacity:0;}
+  100%{transform:translateY(0);opacity:1;}
+}
+@keyframes floatNotifOut{
+  0%{transform:translateY(0);opacity:1;}
+  100%{transform:translateY(-120%);opacity:0;}
+}
+@keyframes sosNotifPulse{
+  0%,100%{box-shadow:0 8px 32px rgba(0,0,0,.7),0 0 30px rgba(255,34,68,.25);}
+  50%{box-shadow:0 8px 32px rgba(0,0,0,.7),0 0 50px rgba(255,34,68,.5);}
+}
+.float-notif-icon{
+  width:50px;height:50px;border-radius:50%;flex-shrink:0;
+  display:flex;align-items:center;justify-content:center;
+  font-size:24px;
+  background:rgba(255,34,68,.15);
+  border:2px solid rgba(255,34,68,.35);
+  background-size:cover;background-position:center;
+}
+.float-notif.chat-type .float-notif-icon{
+  background:rgba(0,180,255,.12);
+  border-color:rgba(0,180,255,.35);
+}
+.float-notif-body{flex:1;min-width:0;overflow:hidden;}
+.float-notif-app{
+  font-size:9.5px;font-weight:700;color:rgba(255,34,68,.8);
+  letter-spacing:1.5px;text-transform:uppercase;margin-bottom:3px;
+}
+.float-notif.chat-type .float-notif-app{color:rgba(0,180,255,.8);}
+.float-notif-title{
+  font-size:14px;font-weight:800;color:#fff;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+}
+.float-notif-text{
+  font-size:12px;color:rgba(255,255,255,.6);margin-top:2px;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  line-height:1.4;
+}
+.float-notif-time{
+  font-size:10px;color:rgba(255,255,255,.3);flex-shrink:0;
+  align-self:flex-start;margin-top:2px;
+}
+.float-notif-close{
+  position:absolute;top:6px;left:8px;
+  background:rgba(255,255,255,.1);border:none;
+  color:rgba(255,255,255,.4);
+  width:22px;height:22px;border-radius:50%;
+  font-size:11px;cursor:pointer;
+  display:flex;align-items:center;justify-content:center;
+  opacity:0;transition:opacity .2s;
+}
+.float-notif:hover .float-notif-close{opacity:1;}
+
+/* ══════════════════════════════════════════
+   ENHANCED INCOMING CALL SCREEN
+══════════════════════════════════════════ */
+.alert-modal.show .alert-card{
+  animation:alertCardIn .5s cubic-bezier(.22,1,.36,1) forwards;
+}
+@keyframes alertCardIn{
+  0%{transform:scale(.85) translateY(40px);opacity:0;}
+  100%{transform:scale(1) translateY(0);opacity:1;}
+}
+
+/* Caller avatar pulse */
+.al-av-pulse{
+  position:relative;
+}
+.al-av-pulse::before,
+.al-av-pulse::after{
+  content:'';position:absolute;inset:-8px;
+  border-radius:50%;border:2px solid rgba(255,34,68,.4);
+  animation:callerPulse 2s ease-out infinite;
+}
+.al-av-pulse::after{animation-delay:.5s;}
+@keyframes callerPulse{
+  0%{transform:scale(1);opacity:.6;}
+  100%{transform:scale(1.5);opacity:0;}
+}
+
+/* Slide up call buttons */
+.al-btns{
+  animation:btnsSlideUp .6s cubic-bezier(.22,1,.36,1) .3s both;
+}
+@keyframes btnsSlideUp{
+  0%{transform:translateY(30px);opacity:0;}
+  100%{transform:translateY(0);opacity:1;}
+}
+
+/* ══════════════════════════════════════════
+   IN-APP NOTIFICATION DOT/BADGE
+══════════════════════════════════════════ */
+.tab-btn .notif-dot{
+  position:absolute;top:5px;right:calc(50% - 15px);
+  width:8px;height:8px;border-radius:50%;
+  background:var(--red);
+  box-shadow:0 0 8px var(--red);
+  display:none;
+}
+.tab-btn .notif-dot.active{display:block;animation:dotPulse 2s ease infinite;}
+@keyframes dotPulse{0%,100%{opacity:1;transform:scale(1);}50%{opacity:.5;transform:scale(1.3);}}
+
+/* Chat typing indicator */
+.typing-indicator{
+  display:inline-flex;align-items:center;gap:3px;
+  padding:4px 10px;
+}
+.typing-dot{
+  width:5px;height:5px;border-radius:50%;
+  background:rgba(255,255,255,.4);
+  animation:typingBounce .8s ease-in-out infinite;
+}
+.typing-dot:nth-child(2){animation-delay:.15s;}
+.typing-dot:nth-child(3){animation-delay:.3s;}
+@keyframes typingBounce{0%,80%,100%{transform:translateY(0);}40%{transform:translateY(-6px);}}
+
+/* Message preview in notification */
+.msg-preview-badge{
+  position:fixed;bottom:80px;right:16px;left:16px;
+  z-index:5000;
+  max-width:400px;margin:0 auto;
+}
+
+</style>
+<link rel="manifest" href="#" id="pwa-manifest">
+<link rel="apple-touch-icon" sizes="192x192" href="/icon-192.png">
+<link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png">
+<link rel="icon" type="image/png" sizes="512x512" href="/icon-512.png">
+<meta name="apple-mobile-web-app-title" content="RESCUE">
+<meta name="application-name" content="RESCUE">
+<meta name="msapplication-TileColor" content="#060008">
+<meta name="msapplication-TileImage" content="/icon-192.png">
+<meta name="description" content="نظام نداءات الطوارئ الفوري — أرسل واستقبل نداءات المساعدة مع الموقع الجغرافي">
+<script>
+// ── Inline PWA Manifest ─────────────────────────────────────
+(function(){
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><rect width="512" height="512" rx="110" fill="#060008"/><circle cx="256" cy="256" r="220" fill="none" stroke="rgba(255,34,68,.3)" stroke-width="5"/><circle cx="256" cy="256" r="160" fill="none" stroke="rgba(255,34,68,.45)" stroke-width="4"/><circle cx="256" cy="256" r="110" fill="rgba(255,34,68,.12)" stroke="#ff2244" stroke-width="5"/><text x="256" y="298" font-size="130" text-anchor="middle">🚨</text><text x="256" y="400" font-size="44" text-anchor="middle" fill="#ff2244" font-family="Arial Black,sans-serif" font-weight="900" letter-spacing="10">RESCUE</text></svg>`;
+  const iconUrl = 'data:image/svg+xml;base64,' + btoa(unescape(encodeURIComponent(svg)));
+
+  const manifest = {
+    name: "RESCUE — نداء الطوارئ",
+    short_name: "RESCUE",
+    description: "نظام نداءات الطوارئ الفوري مع الموقع الجغرافي",
+    start_url: "./",
+    scope: "./",
+    display: "standalone",
+    orientation: "portrait-primary",
+    background_color: "#060008",
+    theme_color: "#060008",
+    lang: "ar",
+    dir: "rtl",
+    categories: ["utilities", "lifestyle"],
+    icons: [
+      { src: iconUrl, sizes: "192x192", type: "image/svg+xml", purpose: "any" },
+      { src: iconUrl, sizes: "512x512", type: "image/svg+xml", purpose: "any maskable" }
+    ],
+    shortcuts: [{
+      name: "إرسال نداء طوارئ", short_name: "SOS",
+      url: "./", icons: [{ src: iconUrl, sizes: "192x192" }]
+    }],
+    prefer_related_applications: false
+  };
+  const blob = new Blob([JSON.stringify(manifest)], {type:'application/manifest+json'});
+  document.getElementById('pwa-manifest').href = URL.createObjectURL(blob);
+
+  // Set favicon & apple icon dynamically
+  document.querySelectorAll('link[rel*="icon"]').forEach(l => { l.href = iconUrl; });
+})();
+
+</script>
+</head>
+<body>
+<div class="float-notif-container" id="float-notif-container"></div>
+
+<!-- LOADING -->
+<div class="loading-overlay" id="loading-overlay">
+  <div class="loading-spin"></div>
+  <div class="loading-msg" id="loading-msg">جاري التحميل...</div>
+</div>
+
+<!-- INCOMING ALERT -->
+<div class="alert-modal" id="alert-modal">
+  <div class="alert-card">
+    <!-- شريط رنين علوي -->
+    <div class="al-ring-bar">
+      <div class="al-ring-progress" id="al-ring-progress" style="width:100%"></div>
+    </div>
+
+    <!-- Header -->
+    <div class="al-header">
+      <div class="al-emoji">🚨</div>
+      <div class="al-header-text">
+        <div class="al-sos-label">نداء طوارئ</div>
+        <div class="al-countdown" id="al-countdown">🔊 يرن...</div>
+      </div>
+      <div class="al-time" id="al-time"></div>
+    </div>
+
+    <!-- Body -->
+    <div class="al-body">
+      <div class="al-av-row">
+        <div class="al-av al-av-pulse" id="al-avatar"></div>
+        <div class="al-info">
+          <div class="al-name" id="al-name"></div>
+          <div class="al-user" id="al-user"></div>
+        </div>
+      </div>
+      <div class="al-msg" id="al-msg"></div>
+      <div class="al-coords" id="al-coords"></div>
+    </div>
+
+    <!-- أزرار -->
+    <div class="al-btns">
+      <button class="al-loc-btn" id="al-loc-btn">📍 عرض موقع المرسل على الخريطة</button>
+      <button class="al-respond" id="al-respond">
+        <span>✅</span><span>استلام وعرض الموقع</span>
+      </button>
+      <button class="al-dismiss" id="al-dismiss">تجاهل مؤقتاً (سيرن بعد 15ث)</button>
+    </div>
+  </div>
+</div>
+
+<!-- TARGET SELECTION MODAL -->
+<div class="tmod-overlay" id="target-modal">
+  <div class="tmod-card">
+    <div class="tmod-head">
+      <div>
+        <div class="tmod-title">🎯 اختر مستلمي النداء</div>
+        <div class="tmod-subtitle">اضغط لتحديد / إلغاء تحديد</div>
+      </div>
+      <button class="tmod-close" onclick="closeTargetModal()">✕</button>
+    </div>
+    <!-- تحذير مهم -->
+    <div class="tmod-warning">
+      ⚠️ لا تستخدم التطبيق للمزاح أو لأشياء غير ضرورية — للحفاظ على أهمية المنبّه ومصداقيته
+    </div>
+    <div class="tmod-body">
+      <div id="target-modal-list"></div>
+    </div>
+    <button class="tmod-confirm" onclick="closeTargetModal()">تأكيد الاختيار ✅</button>
+  </div>
+</div>
+
+<!-- EDIT PROFILE MODAL -->
+<div class="modal-overlay" id="edit-modal">
+  <div class="modal-card">
+    <div class="modal-header">
+      <span class="modal-title">✏️ تعديل الملف الشخصي</span>
+      <button class="modal-close" id="edit-close">✕</button>
+    </div>
+    <div class="edit-av-row">
+      <div class="edit-av-disp" id="edit-avatar-disp"></div>
+      <div>
+        <button class="btn-change-av" id="edit-avatar-btn">📷 تغيير الصورة</button>
+        <input type="file" id="edit-avatar-file" accept="image/*" style="display:none">
+        <div style="font-size:11px;color:var(--t2);margin-top:6px">الصورة الشخصية</div>
+      </div>
+    </div>
+    <div class="ig" style="margin-bottom:10px">
+      <label class="il">الاسم الكامل</label>
+      <input class="inp" id="edit-name" dir="rtl" placeholder="اسمك الكامل">
+    </div>
+    <div class="ig" style="margin-bottom:14px;position:relative">
+      <label class="il">اليوزر</label>
+      <input class="inp" id="edit-username" style="direction:ltr;padding-left:60px" placeholder="username">
+      <div class="uname-prev" id="edit-username-preview"></div>
+    </div>
+    <button class="btn-main" id="edit-save">حفظ التعديلات ✅</button>
+  </div>
+</div>
+
+<!-- ══════════ NOTIFICATION PANEL ══════════ -->
+<div class="notif-panel-overlay" id="notif-panel-overlay" onclick="if(event.target===this)closeNotifPanel()">
+  <div class="notif-panel">
+    <div class="notif-panel-head">
+      <span style="font-size:20px">🔔</span>
+      <div class="notif-panel-title">الإشعارات</div>
+      <button class="notif-panel-clear" onclick="clearAllNotifs()">مسح الكل</button>
+      <button class="notif-panel-close" onclick="closeNotifPanel()">✕</button>
+    </div>
+    <div class="notif-tabs">
+      <button class="notif-tab active" id="ntab-chat" onclick="switchNotifTab('chat')">
+        💬 الدردشة
+        <span class="notif-tab-badge" id="ntab-chat-badge" style="display:none"></span>
+      </button>
+      <button class="notif-tab" id="ntab-sos" onclick="switchNotifTab('sos')">
+        🚨 النداءات
+        <span class="notif-tab-badge" id="ntab-sos-badge" style="display:none"></span>
+      </button>
+    </div>
+    <div class="notif-list" id="notif-list"></div>
+  </div>
+</div>
+
+<!-- ══════════ CHAT SCREEN ══════════ -->
+<div id="screen-chat">
+  <div class="chat-topbar">
+    <button class="chat-back" onclick="closeChat()">←</button>
+    <div class="chat-friend-av" id="chat-topbar-av"></div>
+    <div class="chat-friend-info">
+      <div class="chat-friend-name" id="chat-topbar-name">—</div>
+      <div class="chat-friend-status" id="chat-topbar-status">—</div>
+    </div>
+    <button class="chat-settings-btn" onclick="openChatSettings()" title="إعدادات المحادثة">⚙️</button>
+  </div>
+  <div class="chat-bg" id="chat-bg"></div>
+  <div class="chat-msgs-wrap" id="chat-msgs-wrap">
+    <div class="chat-empty-state" id="chat-empty-state">
+      <div class="chat-empty-icon">💬</div>
+      <div style="font-size:13px;line-height:1.7">ابدأ محادثتك مع<br><strong id="chat-empty-name"></strong></div>
+    </div>
+  </div>
+  <div class="chat-input-bar">
+    <button class="chat-sos-mini-btn" onclick="sendChatSOS()" title="نداء طوارئ">🚨</button>
+    <input class="chat-inp" id="chat-inp" placeholder="اكتب رسالة..." dir="rtl"
+      onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendChatMsg();}">
+    <button class="chat-send-btn" onclick="sendChatMsg()">➤</button>
+  </div>
+</div>
+
+<!-- ══════════ CHAT SETTINGS MODAL ══════════ -->
+<div class="cs-overlay" id="cs-overlay">
+  <div class="cs-sheet">
+    <div class="cs-head">
+      <div class="cs-friend-av" id="cs-friend-av"></div>
+      <div class="cs-friend-info">
+        <div class="cs-friend-name" id="cs-friend-name"></div>
+        <div class="cs-friend-uname" id="cs-friend-uname"></div>
+        <div class="cs-friend-status" id="cs-friend-status"></div>
+      </div>
+      <button class="cs-close-btn" onclick="closeChatSettings()">✕</button>
+    </div>
+
+    <!-- Stats -->
+    <div class="cs-stats-grid" id="cs-stats-grid"></div>
+
+    <!-- Notifications -->
+    <div class="cs-section">
+      <div class="cs-section-label">🔔 الإشعارات</div>
+      <div class="cs-row">
+        <div class="cs-row-ico">🔔</div>
+        <div class="cs-row-txt">
+          <div class="cs-row-title">إشعارات الرسائل</div>
+          <div class="cs-row-sub">تنبيه عند وصول رسالة جديدة</div>
+        </div>
+        <button class="cs-toggle on" id="cs-t-notif" onclick="toggleCS('notif')"></button>
+      </div>
+      <div class="cs-row">
+        <div class="cs-row-ico">🔊</div>
+        <div class="cs-row-txt">
+          <div class="cs-row-title">صوت الرسائل</div>
+          <div class="cs-row-sub">تشغيل صوت عند وصول رسالة</div>
+        </div>
+        <button class="cs-toggle on" id="cs-t-sound" onclick="toggleCS('sound')"></button>
+      </div>
+      <div class="cs-row">
+        <div class="cs-row-ico">📳</div>
+        <div class="cs-row-txt">
+          <div class="cs-row-title">اهتزاز</div>
+          <div class="cs-row-sub">اهتزاز عند وصول رسالة</div>
+        </div>
+        <button class="cs-toggle on" id="cs-t-vib" onclick="toggleCS('vib')"></button>
+      </div>
+    </div>
+
+    <!-- Privacy -->
+    <div class="cs-section">
+      <div class="cs-section-label">🔒 الخصوصية</div>
+      <div class="cs-row">
+        <div class="cs-row-ico">✅</div>
+        <div class="cs-row-txt">
+          <div class="cs-row-title">إشعار القراءة</div>
+          <div class="cs-row-sub">إرسال علامة "تم القراءة"</div>
+        </div>
+        <button class="cs-toggle on" id="cs-t-read" onclick="toggleCS('read')"></button>
+      </div>
+      <div class="cs-row">
+        <div class="cs-row-ico">🔐</div>
+        <div class="cs-row-txt">
+          <div class="cs-row-title">التشفير</div>
+          <div class="cs-row-sub">رسائلك محمية بتشفير Firebase</div>
+        </div>
+        <div class="cs-row-right" style="color:var(--green)">نشط ✓</div>
+      </div>
+    </div>
+
+    <!-- Danger -->
+    <div class="cs-danger-zone">
+      <div class="cs-danger-label">⚠️ منطقة الخطر</div>
+      <button class="cs-danger-btn" onclick="clearChatHistory()">🗑️ حذف سجل المحادثة بالكامل</button>
+      <button class="cs-danger-btn cs-block" onclick="blockAndRemoveFriend()">🚫 حظر وحذف هذا الصديق</button>
+    </div>
+  </div>
+</div>
+
+<!-- SPLASH -->
+<div class="screen active" id="screen-splash">
+  <div class="spl-logo">🚨</div>
+  <div class="spl-title">RESCUE</div>
+  <div class="spl-sub">نظام الطوارئ الفوري</div>
+  <div class="spl-dots">
+    <div class="spl-dot"></div>
+    <div class="spl-dot"></div>
+    <div class="spl-dot"></div>
+  </div>
+</div>
+
+<!-- REGISTER -->
+<div class="screen" id="screen-register">
+  <div class="auth-card">
+    <div class="auth-logo">🚨 RESCUE</div>
+    <div class="auth-sub">إنشاء حساب جديد</div>
+
+    <div class="av-pick" id="reg-avatar-btn">
+      <div class="av-pick-icon" id="reg-avatar-icon">📷</div>
+      <img id="reg-avatar-img" style="display:none" alt="">
+    </div>
+    <input type="file" id="reg-avatar-file" accept="image/*" style="display:none">
+
+    <div class="ig">
+      <label class="il">الاسم الكامل</label>
+      <input class="inp" id="reg-name" placeholder="مثال: محمد أحمد" dir="rtl">
+    </div>
+    <div class="ig" style="position:relative">
+      <label class="il">اليوزر (بالإنجليزي)</label>
+      <input class="inp" id="reg-username" placeholder="mhmd123" style="direction:ltr;padding-left:58px">
+      <div class="uname-prev" id="username-preview"></div>
+    </div>
+    <div class="ig">
+      <label class="il">كلمة المرور</label>
+      <input class="inp" id="reg-pass" type="password" placeholder="6 أحرف على الأقل" dir="ltr">
+    </div>
+    <div class="ig">
+      <label class="il">تأكيد كلمة المرور</label>
+      <input class="inp" id="reg-pass2" type="password" placeholder="أعد كتابة كلمة المرور" dir="ltr">
+    </div>
+
+    <button class="btn-main" id="reg-submit">إنشاء الحساب 🚀</button>
+    <div class="auth-switch">لديك حساب؟ <a onclick="initLogin()">سجّل الدخول</a></div>
+  </div>
+</div>
+
+<!-- LOGIN -->
+<div class="screen" id="screen-login">
+  <div class="auth-card">
+    <div class="auth-logo">🚨 RESCUE</div>
+    <div class="auth-sub">تسجيل الدخول</div>
+
+    <div style="font-size:56px;margin:6px 0">🔐</div>
+
+    <div class="ig">
+      <label class="il">اليوزر</label>
+      <input class="inp" id="login-username" placeholder="أدخل يوزرك" style="direction:ltr">
+    </div>
+    <div class="ig">
+      <label class="il">كلمة المرور</label>
+      <input class="inp" id="login-pass" type="password" placeholder="كلمة المرور" dir="ltr">
+    </div>
+
+    <button class="btn-main" id="login-submit">تسجيل الدخول 🔑</button>
+    <div class="auth-switch">ليس لديك حساب؟ <a onclick="initRegister()">أنشئ حساباً</a></div>
+  </div>
+</div>
+
+<!-- MAIN -->
+<div class="screen" id="screen-main">
+  <!-- Topbar -->
+  <div class="topbar">
+    <div class="tb-user" onclick="switchTab('profile')">
+      <div class="tb-av" id="topbar-avatar"></div>
+      <div class="tb-info">
+        <div class="tb-name" id="topbar-name"></div>
+        <div class="tb-uname" id="topbar-username"></div>
+      </div>
+    </div>
+    <div class="tb-logo">RESCUE</div>
+    <div style="display:flex;align-items:center;gap:7px;">
+      <button class="notif-bell-btn" id="notif-bell-btn" onclick="openNotifPanel()" title="الإشعارات">
+        🔔
+        <span class="notif-count-badge" id="notif-count-badge"></span>
+      </button>
+      <div class="conn-ind" id="conn-status">⏳</div>
+    </div>
+  </div>
+
+  <!-- Status -->
+  <div class="status-bar">
+    <div class="st-dot"></div>
+    <span class="st-txt">النظام جاهز للطوارئ</span>
+  </div>
+
+  <!-- Tab Contents -->
+  <div class="tabs-content">
+
+    <!-- HOME -->
+    <div class="tab-content" id="content-home">
+      <div class="target-sec">
+        <div class="target-lbl">إرسال النداء إلى:</div>
+        <div class="target-selector" id="target-selector"></div>
+      </div>
+      <div class="sos-container">
+        <div class="sos-rings">
+          <div class="sos-ring"></div><div class="sos-ring"></div>
+          <div class="sos-ring"></div><div class="sos-ring"></div>
+        </div>
+        <svg class="prg-svg" viewBox="0 0 228 228">
+          <circle cx="114" cy="114" r="90" fill="none" stroke="transparent" stroke-width="5" id="prg-circle"/>
+        </svg>
+        <div class="sos-circle" id="sos-circle">
+          <div class="sos-icon">🆘</div>
+          <div class="sos-lbl">طوارئ</div>
+          <div class="sos-hint">اضغط مطولاً</div>
+        </div>
+      </div>
+      <div class="sos-hint-bar">💡 اضغط مطولاً للإرسال · اضغط على زر الاختيار لتحديد المستلمين</div>
+    </div>
+
+    <!-- FRIENDS -->
+    <div class="tab-content" id="content-friends">
+      <div style="padding:14px;display:flex;flex-direction:column;gap:10px;width:100%;">
+        <div class="add-bar">
+          <input class="inp" id="add-friend-input" placeholder="أدخل يوزر الشخص" style="direction:ltr"
+            onkeydown="if(event.key==='Enter')handleAddFriend()">
+          <button class="btn-add" onclick="handleAddFriend()">إضافة +</button>
+        </div>
+        <!-- Friend Search Bar -->
+        <div class="friend-search-wrap">
+          <span class="friend-search-icon">🔍</span>
+          <input class="friend-search-inp" id="friend-search-inp"
+            placeholder="ابحث باسم الصديق أو يوزره..."
+            oninput="filterFriendsList(this.value)"
+            onkeydown="if(event.key==='Escape'){this.value='';filterFriendsList('');}">
+          <button class="friend-search-clear" id="friend-search-clear"
+            onclick="document.getElementById('friend-search-inp').value='';filterFriendsList('');this.style.display='none';">✕</button>
+        </div>
+        <div class="friends-wrap">
+          <div id="friends-list-container"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- HISTORY -->
+    <div class="tab-content" id="content-history">
+      <div style="padding:14px;width:100%;">
+        <div id="history-container"><div class="loading-spin-sm"></div></div>
+      </div>
+    </div>
+
+    <!-- PROFILE -->
+    <div class="tab-content" id="content-profile">
+      <div style="padding:18px;width:100%;display:flex;flex-direction:column;align-items:center;">
+        <div class="pf-card">
+          <div class="pf-av" id="pf-avatar"></div>
+          <div class="pf-name" id="pf-name"></div>
+          <div class="pf-uname" id="pf-username"></div>
+          <div class="pf-joined" id="pf-joined"></div>
+          <div class="pf-stats">
+            <div class="stat-c">
+              <div class="stat-n" id="pf-friends-n">0</div>
+              <div class="stat-l">أصدقاء</div>
+            </div>
+            <div class="stat-c">
+              <div class="stat-n" id="pf-alerts-n">0</div>
+              <div class="stat-l">نداءات</div>
+            </div>
+          </div>
+          <button class="btn-edit" onclick="openEditProfile()">✏️ تعديل الملف الشخصي</button>
+          <button class="btn-logout" onclick="logout()">تسجيل الخروج 🚪</button>
+
+          <!-- زر تثبيت التطبيق -->
+          <button class="btn-edit" id="pwa-install-btn" onclick="installPWA()" style="display:none;background:rgba(255,34,68,.08);border-color:rgba(255,34,68,.25);color:var(--red);">
+            📲 تثبيت التطبيق على الجهاز
+          </button>
+
+
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- Bottom Nav -->
+  <div class="bottom-nav">
+    <button class="tab-btn" id="tab-home" onclick="switchTab('home')">
+      <span class="ti">🏠</span><span class="tl">الرئيسية</span>
+    </button>
+    <button class="tab-btn" id="tab-friends" onclick="switchTab('friends')">
+      <span class="ti">👥</span><span class="tl">الأصدقاء</span>
+      <span class="friends-badge" id="friends-badge" style="display:none"></span>
+    </button>
+
+    <!-- زر 911 يعلو الشريط -->
+    <div class="nav-911-wrap">
+      <button class="nav-911-btn" onclick="call911()" aria-label="اتصل بالطوارئ 911">
+        <span class="nav-911-num">911</span>
+        <span class="nav-911-sub">طوارئ</span>
+      </button>
+      <span class="nav-911-label">اتصل</span>
+    </div>
+
+    <button class="tab-btn" id="tab-history" onclick="switchTab('history')">
+      <span class="ti">📋</span><span class="tl">السجل</span>
+    </button>
+    <button class="tab-btn" id="tab-profile" onclick="switchTab('profile')">
+      <span class="ti">👤</span><span class="tl">الملف</span>
+    </button>
+  </div>
+</div>
+
+<script>
+// ── PWA Install Prompt ──────────────────────────────────────
+let _deferredPrompt = null;
+
+window.addEventListener('beforeinstallprompt', (e) => {
+  e.preventDefault();
+  _deferredPrompt = e;
+  const btn = document.getElementById('pwa-install-btn');
+  if (btn) btn.style.display = 'block';
+});
+
+function installPWA() {
+  if (!_deferredPrompt) {
+    // Show manual install instructions
+    const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
+    if (isIOS) {
+      showToast('📲 على iOS: اضغط على زر المشاركة ↑ ثم "أضف إلى الشاشة الرئيسية"', 'warning');
+    } else {
+      showToast('📲 اضغط على قائمة المتصفح ⋮ ثم "تثبيت التطبيق" أو "أضف إلى الشاشة الرئيسية"', 'warning');
+    }
+    return;
+  }
+  _deferredPrompt.prompt();
+  _deferredPrompt.userChoice.then((result) => {
+    if (result.outcome === 'accepted') {
+      showToast('✅ تم تثبيت التطبيق بنجاح!', 'success');
+    }
+    _deferredPrompt = null;
+    const btn = document.getElementById('pwa-install-btn');
+    if (btn) btn.style.display = 'none';
+  });
+}
+
+window.installPWA = installPWA;
+
+window.addEventListener('appinstalled', () => {
+  showToast('✅ RESCUE مثبّت الآن كتطبيق!', 'success');
+  const btn = document.getElementById('pwa-install-btn');
+  if (btn) btn.style.display = 'none';
+});
+</script>
+
+</body>
+</html>
