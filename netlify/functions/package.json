@@ -1,9 +1,0 @@
-{
-  "name": "rescue-functions",
-  "version": "1.0.0",
-  "description": "RESCUE Emergency App - Netlify Functions",
-  "dependencies": {
-    "firebase-admin": "^12.0.0"
-  }
-}
-
